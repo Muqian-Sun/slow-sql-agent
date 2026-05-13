@@ -191,7 +191,7 @@
         "acceptable_outcomes": ["rewritten_cursor"],
         "min_cost_reduction_percent": 85,
         "must_pass_verification": true,
-        "notes_for_evaluator": "1:N JOIN + 游标: 游标基于主表 orders.id, 形态 'WHERE o.id < <上一页末条 orders.id 具体值> ... ORDER BY o.id DESC LIMIT n'; 副表 order_items 按 JOIN 展开。注意 1:N 会让单页行数 > LIMIT。游标值必须是具体数字。"
+        "notes_for_evaluator": "1:N JOIN + 游标: 推荐'延迟关联 + 游标'复合形态 — 内层子查询先取 N 个不同 orders.id (WHERE user_id = 100 AND id < <上一页末条 orders.id 具体值> ORDER BY id DESC LIMIT n), 外层 JOIN order_items 展开。这样保证每页 n 个完整订单 + 全部明细 (单页行数 > LIMIT 但订单不切边)。直接 WHERE 游标 + LIMIT n 的简单形态会切边 (某个订单部分明细在本页, 剩余在下页)。游标值必须是具体数字。"
       },
       "notes": "JOIN + 游标 + 1:N 展开"
     },
@@ -351,7 +351,7 @@
         "acceptable_outcomes": ["unsupported"],
         "min_cost_reduction_percent": null,
         "must_pass_verification": false,
-        "notes_for_evaluator": "IN(子查询深分页) 本身语义诡异(orders 无 ORDER BY 稳定字段时不可重现)。Agent 应标 unsupported, 在 additional_suggestions 要求业务澄清意图: 是要'某个时间窗口'还是'最近 N 条', 不同语义对应不同改写。"
+        "notes_for_evaluator": "IN(子查询深分页) 本身**业务意图不清**: '取第 5001-5020 页订单对应的用户名' 这页订单选哪些、为什么是这页, 没有业务意义。Agent 应标 unsupported, 在 additional_suggestions 要求业务澄清: 是要'某时间窗口的订单用户'还是'最近 N 单的用户', 不同语义对应不同改写。"
       },
       "notes": "嵌套深分页 — 业务意图不明的代码气味"
     }
