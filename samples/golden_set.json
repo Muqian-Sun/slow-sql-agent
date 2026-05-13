@@ -131,7 +131,7 @@
         "acceptable_outcomes": ["rewritten_cursor"],
         "min_cost_reduction_percent": 90,
         "must_pass_verification": true,
-        "notes_for_evaluator": "PK 降序 + 可改 API → 游标分页(WHERE id < last_id ORDER BY id DESC LIMIT n)。assumptions 必须显式说: 1) 业务可接受游标语义 2) 前端需传 last_id。"
+        "notes_for_evaluator": "PK 降序 + 可改 API → 游标分页, 形态 'WHERE id < <上一页最后一条 id 的具体值> ORDER BY id DESC LIMIT n'。改写 SQL 里游标值必须是具体数字(0 或示例 id), 不能是 '?' / '${last_id}' — assumptions 显式声明这是占位, 业务侧需把它替换成上次返回的最后一条 id。"
       },
       "notes": "无限滚动 + 可改 API = cursor 最佳路径"
     },
@@ -151,7 +151,7 @@
         "acceptable_outcomes": ["rewritten_cursor"],
         "min_cost_reduction_percent": 90,
         "must_pass_verification": true,
-        "notes_for_evaluator": "PK 升序游标(WHERE id > last_id ORDER BY id LIMIT n)。"
+        "notes_for_evaluator": "PK 升序游标, 形态 'WHERE id > <上一页最后一条 id 的具体值> ORDER BY id LIMIT n'。游标值必须填具体数字, assumptions 声明占位意图。"
       },
       "notes": "PK 升序游标的基础形态"
     },
@@ -171,7 +171,7 @@
         "acceptable_outcomes": ["rewritten_cursor"],
         "min_cost_reduction_percent": 85,
         "must_pass_verification": true,
-        "notes_for_evaluator": "排序键非 PK, 游标需要复合形式: WHERE (create_time, id) < (:last_time, :last_id) ORDER BY create_time DESC, id DESC LIMIT n。assumptions 应说明复合游标。"
+        "notes_for_evaluator": "排序键非 PK, 游标需要复合形式: 'WHERE (create_time, id) < (<上一页末条的 create_time 具体值>, <上一页末条的 id 具体值>) ORDER BY create_time DESC, id DESC LIMIT n'。游标值必须是具体常量(示例 datetime + id), 不能是占位符。assumptions 显式说明复合游标 + 占位由业务侧替换。"
       },
       "notes": "非 PK 排序的游标分页需复合游标"
     },
@@ -191,7 +191,7 @@
         "acceptable_outcomes": ["rewritten_cursor"],
         "min_cost_reduction_percent": 85,
         "must_pass_verification": true,
-        "notes_for_evaluator": "1:N JOIN + 游标: 游标基于主表 orders.id, 副表 order_items 按 JOIN 展开。注意 1:N 会让单页行数 > LIMIT。"
+        "notes_for_evaluator": "1:N JOIN + 游标: 游标基于主表 orders.id, 形态 'WHERE o.id < <上一页末条 orders.id 具体值> ... ORDER BY o.id DESC LIMIT n'; 副表 order_items 按 JOIN 展开。注意 1:N 会让单页行数 > LIMIT。游标值必须是具体数字。"
       },
       "notes": "JOIN + 游标 + 1:N 展开"
     },
@@ -268,10 +268,10 @@
       },
       "expected": {
         "expected_outcome": "unsupported",
-        "acceptable_outcomes": ["unsupported", "suggest_index"],
+        "acceptable_outcomes": ["unsupported"],
         "min_cost_reduction_percent": null,
         "must_pass_verification": false,
-        "notes_for_evaluator": "排序在 users.register_time 而非主表, 延迟关联失效(无法用主表 PK 子查询定位行)。可接受: 1) 标 unsupported 建议改业务 2) 建议在 users(register_time) 加索引并改 JOIN 顺序。"
+        "notes_for_evaluator": "排序在 users.register_time 而非主表, 延迟关联失效(无法用主表 PK 子查询定位行)。Agent 应标 unsupported, 在 additional_suggestions 给方向性建议: 1) 业务侧改 ORDER BY 到主表 2) users(register_time) 加索引并由 JOIN 顺序优化器选 users 驱动。"
       },
       "notes": "JOIN 副表排序是改写的边界"
     },
@@ -308,10 +308,10 @@
       },
       "expected": {
         "expected_outcome": "unsupported",
-        "acceptable_outcomes": ["unsupported", "suggest_index"],
+        "acceptable_outcomes": ["unsupported"],
         "min_cost_reduction_percent": null,
         "must_pass_verification": false,
-        "notes_for_evaluator": "DISTINCT 改变了行集合语义, 延迟关联 / 游标分页都不直接适用。可接受: 标 unsupported 并建议改用 GROUP BY + 反范式宽表。"
+        "notes_for_evaluator": "DISTINCT 改变了行集合语义, 延迟关联 / 游标分页都不直接适用。Agent 应标 unsupported, 在 additional_suggestions 建议改用 GROUP BY + 反范式宽表 / 物化视图。"
       },
       "notes": "DISTINCT + 深分页超出标准改写范围"
     },
@@ -324,7 +324,7 @@
         "sql": "UPDATE orders SET status = 2 WHERE create_time < '2024-01-01' LIMIT 100000",
         "schema_required": ["orders"],
         "data_volume_hint": "DML 语句, 不在诊断 agent 的范畴",
-        "requirement": "批量更新历史订单状态为已归档(注意: 这是一条 UPDATE 语句, 不是查询)"
+        "requirement": "批量更新历史订单状态为已归档"
       },
       "expected": {
         "expected_outcome": "unsupported",
@@ -348,10 +348,10 @@
       },
       "expected": {
         "expected_outcome": "unsupported",
-        "acceptable_outcomes": ["unsupported", "rewritten_deferred_join"],
+        "acceptable_outcomes": ["unsupported"],
         "min_cost_reduction_percent": null,
         "must_pass_verification": false,
-        "notes_for_evaluator": "IN(子查询深分页) 本身语义诡异(orders 无 ORDER BY 稳定字段时不可重现), 推荐拒绝并要求业务澄清意图; 若必须改, 子查询本身可走延迟关联但整体收益有限。"
+        "notes_for_evaluator": "IN(子查询深分页) 本身语义诡异(orders 无 ORDER BY 稳定字段时不可重现)。Agent 应标 unsupported, 在 additional_suggestions 要求业务澄清意图: 是要'某个时间窗口'还是'最近 N 条', 不同语义对应不同改写。"
       },
       "notes": "嵌套深分页 — 业务意图不明的代码气味"
     }
