@@ -1,7 +1,6 @@
 package com.slowsql.agent.eval;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.slowsql.agent.agent.BusinessContext;
 
 import java.util.List;
 
@@ -24,7 +23,7 @@ public record GoldenCase(
             String sql,
             List<String> schemaRequired,
             String dataVolumeHint,
-            BusinessContext businessContext      // 可为 null
+            String requirement                  // 业务说明自然语言, 可为 null
     ) {}
 
     @JsonIgnoreProperties(ignoreUnknown = true)

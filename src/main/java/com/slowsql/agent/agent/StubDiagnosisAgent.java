@@ -1,36 +1,36 @@
 package com.slowsql.agent.agent;
 
 import java.util.List;
+import java.util.Locale;
 
 /**
  * 测试用的 Stub 实现,使评测基础设施可在无 LLM 环境下脱机运行.
  *
- * 简单规则:
- * - LIMIT offset > 10000 → REWRITTEN_DEFERRED_JOIN
- * - 业务允许改 API → REWRITTEN_CURSOR
- * - 否则 NO_OPTIMIZATION_NEEDED
+ * 简化规则(不追求精确, 只让 smoke 测有通路):
+ *   - SQL 非 SELECT → UNSUPPORTED (DML 等)
+ *   - 业务说明里含游标 / 可改 API 等关键字 → REWRITTEN_CURSOR
+ *   - 否则 → REWRITTEN_DEFERRED_JOIN
+ *
+ * 真实路径选择 / 索引建议 / 越界识别由 LangChain4jDiagnosisAgent + LLM 承担, stub 不负责.
  */
 public class StubDiagnosisAgent implements DiagnosisAgent {
 
     @Override
     public DiagnosisResult diagnose(String sql, BusinessContext context) {
-        long offset = extractLimitOffset(sql);
-
-        if (offset < 10_000) {
+        if (!isSelectLike(sql)) {
             return new DiagnosisResult(
-                    OutcomeType.NO_OPTIMIZATION_NEEDED,
+                    OutcomeType.UNSUPPORTED,
                     null,
-                    List.of("offset 不属深分页范畴"),
+                    List.of("非 SELECT 语句不在改写范围"),
                     0.9,
-                    List.of());
+                    List.of("DML 请走数据迁移流程"));
         }
 
-        boolean canCursor = context != null && Boolean.TRUE.equals(context.canModifyApi());
-        if (canCursor) {
+        if (hintsCursorAllowed(context)) {
             return new DiagnosisResult(
                     OutcomeType.REWRITTEN_CURSOR,
                     "-- cursor pagination rewrite of: " + sql,
-                    List.of("假设业务可改 API 语义", "假设主表有 PK"),
+                    List.of("业务说明含游标 / 可改 API 关键字", "假设主表有 PK"),
                     0.9,
                     List.of("游标分页要求前端传 last_id"));
         }
@@ -43,19 +43,20 @@ public class StubDiagnosisAgent implements DiagnosisAgent {
                 List.of());
     }
 
-    private long extractLimitOffset(String sql) {
-        // 极简正则解析,生产实现走 Druid AST
-        try {
-            String upper = sql.toUpperCase();
-            int limitIdx = upper.lastIndexOf("LIMIT");
-            if (limitIdx < 0) return 0;
-            String tail = sql.substring(limitIdx + 5).trim();
-            if (tail.contains(",")) {
-                return Long.parseLong(tail.split(",")[0].trim());
-            }
-            return 0;
-        } catch (Exception e) {
-            return 0;
-        }
+    private static boolean isSelectLike(String sql) {
+        if (sql == null) return false;
+        String head = sql.trim().toUpperCase(Locale.ROOT);
+        return head.startsWith("SELECT") || head.startsWith("WITH");
+    }
+
+    private static boolean hintsCursorAllowed(BusinessContext ctx) {
+        if (ctx == null || !ctx.hasRequirement()) return false;
+        String req = ctx.requirement().toLowerCase(Locale.ROOT);
+        return req.contains("游标")
+                || req.contains("可改 api") || req.contains("可改api")
+                || req.contains("无限滚动") || req.contains("无限下拉")
+                || req.contains("下拉加载")
+                || req.contains("last_id")
+                || req.contains("infinite_scroll");
     }
 }

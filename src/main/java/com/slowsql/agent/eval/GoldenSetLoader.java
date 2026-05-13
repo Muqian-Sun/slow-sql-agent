@@ -16,13 +16,13 @@ import java.util.List;
  */
 public class GoldenSetLoader {
 
-    /** Smoke 测试默认覆盖的 case ID(5 条核心代表,1 分钟跑完) */
+    /** Smoke 子集 — 三种合法 outcome 的代表 case, 5 个覆盖典型场景. */
     public static final List<String> SMOKE_CASE_IDS = List.of(
-            "case_dp_s_001",   // 简单单表深分页
-            "case_dp_m_001",   // 2 表 JOIN 深分页
-            "case_dp_c_001",   // 4 表 JOIN 深分页(亮点)
-            "case_dp_t_001",   // tie-breaker 场景
-            "case_dp_neg_001"  // 反例:offset 不大不该优化
+            "case_dp_dj_001",   // rewritten_deferred_join 代表
+            "case_dp_cur_001",  // rewritten_cursor 代表
+            "case_dp_idx_001",  // unsupported / 缺索引 + DDL 建议
+            "case_dp_oos_002",  // unsupported / GROUP BY OLAP 越界
+            "case_dp_oos_004"   // unsupported / DML 安全拒绝
     );
 
     private final ObjectMapper mapper;

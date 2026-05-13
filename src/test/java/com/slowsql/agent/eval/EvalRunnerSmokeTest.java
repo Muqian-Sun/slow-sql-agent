@@ -1,6 +1,5 @@
 package com.slowsql.agent.eval;
 
-import com.slowsql.agent.agent.DiagnosisAgent;
 import com.slowsql.agent.agent.StubDiagnosisAgent;
 import org.junit.jupiter.api.Test;
 
@@ -15,8 +14,7 @@ class EvalRunnerSmokeTest {
 
     @Test
     void smokeEvalShouldCompleteAndWriteReport() throws Exception {
-        DiagnosisAgent agent = new StubDiagnosisAgent();
-        EvalRunner runner = new EvalRunner(agent);
+        EvalRunner runner = new EvalRunner(StubDiagnosisAgent::new);
 
         EvalConfig config = EvalConfig.smoke(
                 Path.of("samples/golden_set.json"),
