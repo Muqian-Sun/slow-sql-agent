@@ -73,7 +73,6 @@ public class ReportGenerator {
                 {"avg_react_rounds", String.format("%.1f", r.avgReactRounds()), "< 7"},
                 {"max_react_rounds", String.valueOf(r.maxReactRounds()), "< 12"},
                 {"repeated_tool_call_rate", pct(r.repeatedToolCallRate()), "< 5%"},
-                {"terminated_by_limit_rate", pct(r.terminatedByLimitRate()), "< 3%"},
         });
 
         // Tool 异常分布

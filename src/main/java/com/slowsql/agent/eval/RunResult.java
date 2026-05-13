@@ -15,15 +15,15 @@ public record RunResult(
 
         // 效果层
         boolean outcomeMatched,
-        double costReductionPercent,       // EXPLAIN cost 下降率 (0-1),verify 阶段计算
+        double costReductionPercent,       // EXPLAIN rows 下降率 (0-1),来自 verify 工具的 reduction_pct
         boolean verificationPassed,
-        String verificationStatus,         // EQUIVALENT / NOT_EQUIVALENT / UNDETERMINED
+        String verificationStatus,         // EQUIVALENT / NOT_EQUIVALENT / NOT_APPLICABLE / NOT_CALLED
+        boolean businessContextCompliant,  // 改写是否遵守 requirement 里的 API 修改性约束
 
         // 行为层
         int reactRounds,
         int totalToolCalls,
         int repeatedToolCalls,
-        boolean terminatedByLimit,
         Map<String, Integer> toolFailuresByReason,
 
         // 资源消耗
@@ -51,8 +51,8 @@ public record RunResult(
     public static RunResult error(String caseId, int iteration, long latencyMs, String message) {
         return new RunResult(
                 caseId, iteration, null,
-                false, 0, false, "ERROR",
-                0, 0, 0, false, Map.of(),
+                false, 0, false, "ERROR", false,
+                0, 0, 0, Map.of(),
                 0, latencyMs, message);
     }
 

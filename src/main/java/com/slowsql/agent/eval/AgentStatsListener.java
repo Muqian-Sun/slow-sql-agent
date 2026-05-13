@@ -17,7 +17,13 @@ public class AgentStatsListener {
     private final Map<String, Integer> toolCallCount = new HashMap<>();
     private final Map<String, Integer> sameParamRepeats = new HashMap<>();
     private final Map<String, Integer> failuresByReason = new HashMap<>();
-    private boolean terminatedByLimit = false;
+
+    // verify 专用计数 — EvalRunner 用它判定 verifyPassed (替代之前混乱的 "没 verify_fail 失败 && 任意工具调过" 判定)
+    private int verifyCallCount = 0;
+    private int verifyPassCount = 0;
+    private int verifyFailCount = 0;
+    // 最近一次 verify PASS 拿到的 cost reduction%(cursor / deferred_join 都可能填), 用于 cost_reduction_median 真指标
+    private Double lastVerifyReductionPct = null;
 
     public void onLlmResponse(long tokens) {
         reactRounds++;
@@ -33,12 +39,26 @@ public class AgentStatsListener {
         failuresByReason.merge(reason, 1, Integer::sum);
     }
 
-    public void markTerminatedByLimit() {
-        this.terminatedByLimit = true;
+    /**
+     * verify 工具调用结果上报. pass=true 时累计 verifyPassCount, 并记录 reductionPct(可空).
+     * 注: status='error' 的情况由 onToolFailure 单独走 — 不算 pass 也不算 fail.
+     */
+    public void onVerifyResult(boolean pass, Double reductionPct) {
+        verifyCallCount++;
+        if (pass) {
+            verifyPassCount++;
+            if (reductionPct != null) lastVerifyReductionPct = reductionPct;
+        } else {
+            verifyFailCount++;
+        }
     }
 
     public int reactRounds() { return reactRounds; }
     public long totalTokens() { return totalTokens; }
+    public int verifyCallCount() { return verifyCallCount; }
+    public int verifyPassCount() { return verifyPassCount; }
+    public int verifyFailCount() { return verifyFailCount; }
+    public Double lastVerifyReductionPct() { return lastVerifyReductionPct; }
 
     public int totalToolCalls() {
         return toolCallCount.values().stream().mapToInt(Integer::intValue).sum();
@@ -52,7 +72,6 @@ public class AgentStatsListener {
                 .sum();
     }
 
-    public boolean terminatedByLimit() { return terminatedByLimit; }
 
     public Map<String, Integer> failuresByReason() {
         return Map.copyOf(failuresByReason);

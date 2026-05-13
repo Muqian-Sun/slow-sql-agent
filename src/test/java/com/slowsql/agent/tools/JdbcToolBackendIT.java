@@ -134,8 +134,13 @@ class JdbcToolBackendIT {
         assertThat(r.isPass()).isTrue();
         assertThat(r.strategy()).isEqualTo("row_hash");
         assertThat(r.rowHashSubtype()).isEqualTo("deferred_join");
-        // 行 hash 通过后应该带上改写 plan 摘要
+        // row_hash PASS 现在双跑 EXPLAIN: 应同时有 rewritten_plan + original_plan + reduction
         assertThat(r.rewrittenPlan()).isNotNull().isNotEmpty();
+        assertThat(r.originalPlan()).isNotNull().isNotEmpty();
+        assertThat(r.rewrittenRowsEstimate()).isNotNull();
+        assertThat(r.originalRowsEstimate()).isNotNull();
+        // 同 SQL 改写 reduction 应该接近 0(因为完全没改)
+        assertThat(r.rowsReductionPct()).isNotNull();
     }
 
     @Test

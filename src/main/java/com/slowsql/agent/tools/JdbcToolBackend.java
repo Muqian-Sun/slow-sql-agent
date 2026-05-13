@@ -220,9 +220,14 @@ public class JdbcToolBackend implements ToolBackend {
             }
         }
         if (diffCount == 0) {
-            // 通过 → 顺手拉一份 plan 摘要供 LLM 自查
+            // 通过 → 双跑 EXPLAIN, 拉两边 plan + 算 reduction, 与 cursor_plan_validity 路径对齐
             List<VerifyResult.PlanRow> rewrittenPlan = safeExplainPlan(conn, rewrittenSql);
-            return VerifyResult.passRowHash(subtype, n, rewrittenPlan);
+            List<VerifyResult.PlanRow> originalPlan = safeExplainPlan(conn, originalSql);
+            long rewrittenRowsEst = sumPlanRows(rewrittenPlan);
+            Long originalRowsEst = originalPlan == null ? null : sumPlanRows(originalPlan);
+            Double reductionPct = computeReductionPct(originalRowsEst, rewrittenRowsEst);
+            return VerifyResult.passRowHash(subtype, n, rewrittenPlan, originalPlan,
+                    rewrittenRowsEst, originalRowsEst, reductionPct);
         }
         // 顺序不一致但集合可能相等 → 提示 LLM 检查 ORDER BY 稳定性
         List<String> sortedOrig = new ArrayList<>(origHashes);
@@ -293,21 +298,30 @@ public class JdbcToolBackend implements ToolBackend {
 
         // 3) 拉原 SQL plan 算 reduction(失败不阻塞 PASS, null 让 Jackson 跳过)
         List<VerifyResult.PlanRow> originalPlan = safeExplainPlan(conn, originalSql);
-        Long originalRowsEst = null;
-        Double reductionPct = null;
-        if (originalPlan != null) {
-            long sum = originalPlan.stream()
-                    .mapToLong(p -> p.rows() == null ? 0 : Math.max(p.rows(), 0))
-                    .sum();
-            originalRowsEst = sum;
-            if (sum > 0) {
-                reductionPct = 100.0 * (sum - rewrittenRowsEst) / sum;
-            }
-        }
+        Long originalRowsEst = originalPlan == null ? null : sumPlanRows(originalPlan);
+        Double reductionPct = computeReductionPct(originalRowsEst, rewrittenRowsEst);
         return VerifyResult.passCursorPlan(
                 rewrittenPlan, originalPlan,
                 rewrittenRowsEst, originalRowsEst, reductionPct,
                 softWarnings);
+    }
+
+    /** plan 中各表 rows 估算求和(null 当 0); 用于 reduction% 计算. */
+    private static long sumPlanRows(List<VerifyResult.PlanRow> plan) {
+        if (plan == null) return 0;
+        return plan.stream()
+                .mapToLong(p -> p.rows() == null ? 0 : Math.max(p.rows(), 0))
+                .sum();
+    }
+
+    /**
+     * reduction% = (original - rewritten) / original × 100.
+     * 原行数缺失或 ≤ 0 → 返回 null (Jackson 跳过, 不压成 0 误导 LLM "无改进").
+     * 可能为负 (改写更糟), 据实返回.
+     */
+    private static Double computeReductionPct(Long originalRows, long rewrittenRows) {
+        if (originalRows == null || originalRows <= 0) return null;
+        return 100.0 * (originalRows - rewrittenRows) / originalRows;
     }
 
     /** 安全 EXPLAIN: 任何错误返回 null, 用于"补充信息但不阻塞主路径"的场景. */

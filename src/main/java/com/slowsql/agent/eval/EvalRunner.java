@@ -97,35 +97,36 @@ public class EvalRunner {
 
             boolean outcomeMatched = matchesExpected(diagnosis, c.expected());
 
-            // 真实 verify 已由 verifyResultEquivalence 工具在 agent 内部完成;
-            // 这里用 stats.failuresByReason 是否含 verify_fail 来判断本次是否最终通过 verify.
-            boolean verifyToolCalled = stats.failuresByReason().keySet().stream()
-                    .noneMatch(k -> k.contains("verify_fail"))
-                    && stats.totalToolCalls() > 0;
-            boolean verifyPassed = verifyToolCalled
-                    && diagnosis.confidence() >= 0.85
-                    && diagnosis.outcome() != OutcomeType.UNSUPPORTED;
+            // verify 判定改成基于 stats 的真计数 (来源: DiagnosisTools 在每次 verify 工具调用后
+            // 上报 onVerifyResult). 历史实现把 "任何工具调过 && 没 verify_fail" 当 pass + 混
+            // confidence 进判定, 是错的, 已经全部移除.
+            boolean verifyPassed = stats.verifyPassCount() > 0;
             String verifyStatus;
             if (diagnosis.outcome() == OutcomeType.UNSUPPORTED) {
-                verifyStatus = "NOT_APPLICABLE";
+                verifyStatus = "NOT_APPLICABLE";       // unsupported 不需要 verify
+            } else if (stats.verifyCallCount() == 0) {
+                verifyStatus = "NOT_CALLED";           // agent 没调 verify, 违反纪律
             } else if (verifyPassed) {
                 verifyStatus = "EQUIVALENT";
-            } else if (diagnosis.confidence() < 0.7) {
-                verifyStatus = "UNDETERMINED";
             } else {
                 verifyStatus = "NOT_EQUIVALENT";
             }
 
-            // TODO 接入真实 EXPLAIN cost 对比; 暂用 confidence 近似.
-            double costReduction = verifyPassed && diagnosis.rewrittenSql() != null
-                    ? diagnosis.confidence() * 0.9
-                    : 0.0;
+            // cost_reduction 接真值: verify PASS 时 stats 里有 lastVerifyReductionPct (单位 %),
+            // 这里转成 0-1 比例. 没拿到 reduction (e.g. originalRows 估算缺失) 就保 0.
+            double costReduction = 0.0;
+            Double reductionPct = stats.lastVerifyReductionPct();
+            if (verifyPassed && reductionPct != null) {
+                costReduction = Math.max(0.0, reductionPct / 100.0);
+            }
+
+            boolean compliant = isBusinessContextCompliant(ctx.requirement(), diagnosis.outcome());
 
             return new RunResult(
                     c.id(), iteration, diagnosis,
-                    outcomeMatched, costReduction, verifyPassed, verifyStatus,
+                    outcomeMatched, costReduction, verifyPassed, verifyStatus, compliant,
                     stats.reactRounds(), stats.totalToolCalls(), stats.repeatedToolCalls(),
-                    stats.terminatedByLimit(), stats.failuresByReason(),
+                    stats.failuresByReason(),
                     stats.totalTokens(), elapsed,
                     null);
 
@@ -134,6 +135,44 @@ public class EvalRunner {
             long elapsed = (System.nanoTime() - t0) / 1_000_000;
             return RunResult.error(c.id(), iteration, elapsed, e.getMessage());
         }
+    }
+
+    /**
+     * 业务上下文合规性判定: 只有 cursor 改写受约束(必须改 API), 其它 outcome 总合规.
+     *
+     * 规则:
+     *   - outcome != REWRITTEN_CURSOR → 合规
+     *   - requirement 缺失 → 按"保守不可改 API"假设, cursor 违反
+     *   - requirement 含"不能改/不可改/接口不能动/传统翻页/page 参数" → 不允许改 API, cursor 违反
+     *   - requirement 含"可改/前端可改/游标/下拉加载/无限滚动/无限下拉/last_id" → 允许, 合规
+     *   - 两者都含 → 乐观判 允许(常见于 "可以改成游标" 这种描述)
+     *   - 都不含 → 模糊, 按保守假设 cursor 违反
+     */
+    static boolean isBusinessContextCompliant(String requirement, OutcomeType outcome) {
+        if (outcome != OutcomeType.REWRITTEN_CURSOR) return true;
+        if (requirement == null || requirement.isBlank()) return false;
+
+        boolean allowsApiChange = containsAny(requirement,
+                "可改 API", "可改api", "可以改 API", "可以改api",
+                "前端可改", "前端可以改",
+                "游标", "下拉加载", "下拉无限", "无限滚动", "无限下拉",
+                "传 last_id", "传游标", "last_id");
+        if (allowsApiChange) return true;
+
+        boolean forbidsApiChange = containsAny(requirement,
+                "不能改", "不可改", "接口不能动",
+                "传统翻页", "传统分页", "page 参数", "page/page_size");
+        if (forbidsApiChange) return false;
+
+        // 都不含 → 模糊, 按保守假设 cursor 违反
+        return false;
+    }
+
+    private static boolean containsAny(String haystack, String... needles) {
+        for (String n : needles) {
+            if (haystack.contains(n)) return true;
+        }
+        return false;
     }
 
     /** outcome 是否命中 expected / acceptable_outcomes */

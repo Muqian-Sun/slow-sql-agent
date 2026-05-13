@@ -68,10 +68,20 @@ public record VerifyResult(
                 null, null, null, null, null, null, null, null, null);
     }
 
+    /**
+     * row_hash 通过后, 也带上 original/rewritten plan 与 reduction%, 让 LLM 和评测层
+     * 都能拿到"改写真的变快了多少"的信号. 不带 reduction 信息的 PASS 是历史形态, 已废弃.
+     */
     public static VerifyResult passRowHash(String subtype, int sampledRows,
-                                           List<PlanRow> rewrittenPlan) {
+                                           List<PlanRow> rewrittenPlan,
+                                           List<PlanRow> originalPlan,
+                                           long rewrittenRowsEstimate,
+                                           Long originalRowsEstimate,
+                                           Double rowsReductionPct) {
         return new VerifyResult("pass", "row_hash", null, null, null, subtype,
-                sampledRows, null, null, rewrittenPlan, null, null, null, null, List.of());
+                sampledRows, null, null, rewrittenPlan, originalPlan,
+                rewrittenRowsEstimate, originalRowsEstimate, rowsReductionPct,
+                List.of());
     }
 
     /**

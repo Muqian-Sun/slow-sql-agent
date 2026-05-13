@@ -74,7 +74,7 @@ public class MockToolBackend implements ToolBackend {
             return VerifyResult.error("rewritten_sql_unsafe", "rewritten_sql is empty");
         }
         // 桩简化: 一律 general row_hash PASS, 不感知改写形态
-        return VerifyResult.passRowHash("general", 20, null);
+        return VerifyResult.passRowHash("general", 20, null, null, 0L, null, null);
     }
 
     private long parseOffsetGuess(String sql) {

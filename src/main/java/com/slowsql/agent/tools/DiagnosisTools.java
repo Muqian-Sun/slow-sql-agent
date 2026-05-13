@@ -92,10 +92,15 @@ public class DiagnosisTools {
         stats.onToolCall("verifyResultEquivalence", fp(rewrittenSql));
         try {
             VerifyResult r = backend.verifyEquivalence(originalSql, rewrittenSql);
+            // error 不算 pass 也不算 fail, 只上报失败原因 — 让评测层区分"agent 写得太烂导致 verify 跑不起来"
+            // 与"verify 跑了但结果不等价"
             if (r.isError()) {
                 stats.onToolFailure(r.reason());
-            } else if (r.isFail()) {
-                stats.onToolFailure("verify_fail");
+            } else {
+                stats.onVerifyResult(r.isPass(), r.rowsReductionPct());
+                if (r.isFail()) {
+                    stats.onToolFailure("verify_fail");
+                }
             }
             return r.toJson();
         } catch (Exception e) {

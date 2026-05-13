@@ -36,7 +36,6 @@ public record EvalReport(
         double avgReactRounds,
         int maxReactRounds,
         double repeatedToolCallRate,
-        double terminatedByLimitRate,
         Map<String, Integer> toolFailuresByReason,
 
         // ─── 详细数据 ───
@@ -85,10 +84,10 @@ public record EvalReport(
         int totalCalls = all.stream().mapToInt(RunResult::totalToolCalls).sum();
         int totalRepeats = all.stream().mapToInt(RunResult::repeatedToolCalls).sum();
         double repeatRate = totalCalls == 0 ? 0 : (double) totalRepeats / totalCalls;
-        double termRate = ratio(all, RunResult::terminatedByLimit);
 
-        // 业务上下文合规:占有 business_context 输入的 case 中,Agent 决策是否遵守约束(暂记 1.0,待扩展)
-        double businessRate = 1.0;
+        // 业务上下文合规率: cursor 改写时检查 requirement 是否允许改 API. 由 EvalRunner.runSingle
+        // 调 isBusinessContextCompliant 写入 RunResult.businessContextCompliant, 这里取 ratio.
+        double businessRate = ratio(all, RunResult::businessContextCompliant);
 
         // 异常矩阵
         Map<String, Integer> failureMap = new HashMap<>();
@@ -109,7 +108,7 @@ public record EvalReport(
                 resultsPerCase.size(), totalRuns,
                 p95, highConf, 0.0,
                 outcomeMatch, verifyPass, verifyUndet, costMed, businessRate, assumptionsRate,
-                avgRounds, maxRounds, repeatRate, termRate, failureMap,
+                avgRounds, maxRounds, repeatRate, failureMap,
                 caseDetails, all);
     }
 
@@ -134,7 +133,7 @@ public record EvalReport(
         return new EvalReport(config.promptVersion(), Instant.now(),
                 0, 0, 0, 0, 0,
                 0, 0, 0, 0, 0, 0,
-                0, 0, 0, 0, Map.of(),
+                0, 0, 0, Map.of(),
                 List.of(), List.of());
     }
 

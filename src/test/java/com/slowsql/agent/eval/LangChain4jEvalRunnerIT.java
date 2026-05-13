@@ -85,24 +85,24 @@ class LangChain4jEvalRunnerIT {
     }
 
     /**
-     * 全量 17 case 评测 — 1 iter, ~10-15 分钟.
-     * 真要看采样波动可手工把 iterations 调到 3 跑半小时.
+     * 全量 17 case × 3 iter 评测 — LLM 采样有波动, 多跑取均值才能拿稳定指标.
+     * 单跑时间约 30 秒, 17 × 3 ≈ 25-35 分钟. CI / 平时跳过, 只在需要新基线时触发.
      */
     @Test
-    @Timeout(value = 60, unit = TimeUnit.MINUTES)
+    @Timeout(value = 90, unit = TimeUnit.MINUTES)
     void fullEval() throws Exception {
         EvalRunner runner = new EvalRunner(() -> agentFactory.get());
         EvalConfig config = new EvalConfig(
                 Path.of("samples/golden_set.json"),
                 List.of(),
-                1, "mimo-v2.5-pro-full", null, true,
+                3, "mimo-v2.5-pro-full", null, true,
                 Path.of("target/eval-reports"));
 
         EvalReport report = runner.run(config);
-        printSummary("FULL (17 cases × 1 iter)", report);
+        printSummary("FULL (17 cases × 3 iter)", report);
 
         assertThat(report.totalCases()).isEqualTo(17);
-        assertThat(report.totalRuns()).isEqualTo(17);
+        assertThat(report.totalRuns()).isEqualTo(51);
     }
 
     private static void printSummary(String label, EvalReport report) {
