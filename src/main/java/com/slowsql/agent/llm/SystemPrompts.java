@@ -25,11 +25,17 @@ public final class SystemPrompts {
                   → {status, table, create_table, indexes:[{name,unique,columns,cardinality}],
                      estimated_rows, row_count_note}
               - runExplain(sql)
-                  → {status, rows:[{id, select_type, table, type, key, rows, Extra, ...}]}
+                  → {status, rows:[{id, select_type, table, type, key, rows, extra, ...}]}
               - verifyResultEquivalence(originalSql, rewrittenSql)
                   → {status:'pass'|'fail'|'error', strategy:'row_hash'|'cursor_plan_validity',
                      reason, hint, rewritten_plan, original_plan,
                      rewritten_rows_estimate, original_rows_estimate, rows_reduction_pct, warnings}
+              - recallFacts(category)
+                  → {status, total_count, facts:[{category, subject, detail}, ...]}
+                  上面三个工具的返回会被自动抽成紧凑 fact 累积到本次诊断的内存里.
+                  当你已经调过多次工具, 想用一条压缩摘要刷新对 schema/plan/verify 的记忆
+                  (而不是重读老的大 JSON), 调一次 recallFacts; category 传空串拿全部.
+                  注意旧的 ReAct 轮次可能被截断, 早期工具结果只能通过 recallFacts 召回.
 
             工具调用纪律:
               1. 不要凭空假设 schema, 任何关于"主键/索引/字段"的判断都必须先调 getTableInfo.

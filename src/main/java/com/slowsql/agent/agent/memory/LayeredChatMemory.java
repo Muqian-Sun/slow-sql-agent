@@ -13,19 +13,24 @@ import java.util.Objects;
 
 /**
  * 三段式 ChatMemory:
- *   [system + KeyFactStore.render()]  ← 每次 messages() 重组, 注入累积事实
+ *   [system]                          ← 静态, 工厂构造时设入, 不动
  *   [user]                            ← 永远保留(原始 SQL + requirement)
  *   [last K ReAct cycles]             ← 旧的整周期丢掉, 防 token 线性增长
+ *
+ * 关于"事实"(facts):
+ *   FactExtractor 仍然在 ToolExecutionResultMessage 进入时自动抽取累积到 KeyFactStore,
+ *   但**不会**自动注入到 system prompt — 改由 LLM 主动调 DiagnosisTools.recallFacts()
+ *   把当前累积的事实拉出来(pull, 不是 push). 这让 LLM 自己决定什么时候要 fact 摘要,
+ *   不强行占用每轮 prompt 空间.
  *
  * 关键设计:
  *   - 截断单位是"周期"而不是"消息": 一个周期 = AiMessage(带 tool requests) + 后续 ToolExecutionResultMessage.
  *     单条消息截断会让 LLM 看到孤儿 tool request 或没匹配的 result, 模型会崩.
- *   - 接收 ToolExecutionResultMessage 时, 顺便喂给 FactExtractor 累积关键事实.
  *   - 不持久化, 每个 diagnose() 用新实例 — LangChain4jDiagnosisAgent 已经按 case 重建.
  *
  * 与 LangChain4j 默认 MessageWindowChatMemory 的区别:
- *   - 默认实现按消息数 truncate, 不感知 cycle 边界, 也不抽事实.
- *   - 默认 system message 是 immutable 第一条; 我们每轮重组 system, 把"已确认事实"块拼到末尾.
+ *   - 默认实现按消息数 truncate, 不感知 cycle 边界.
+ *   - 默认实现不抽事实; 我们在 add() 时旁路一份给 FactExtractor.
  */
 public class LayeredChatMemory implements ChatMemory {
 
@@ -80,12 +85,8 @@ public class LayeredChatMemory implements ChatMemory {
     @Override
     public synchronized List<ChatMessage> messages() {
         List<ChatMessage> out = new ArrayList<>();
-        if (originalSystem != null) {
-            out.add(composeSystemMessage(originalSystem, factStore));
-        }
-        if (userMessage != null) {
-            out.add(userMessage);
-        }
+        if (originalSystem != null) out.add(originalSystem);
+        if (userMessage != null) out.add(userMessage);
         out.addAll(trimToLastKCycles(recent, keepCycles));
         return out;
     }
@@ -103,16 +104,6 @@ public class LayeredChatMemory implements ChatMemory {
     public KeyFactStore factStore() { return factStore; }
 
     // ------------------------------------------------------------------
-
-    /**
-     * 重组 system message: 原系统提示 + KeyFactStore.render() 块.
-     * factStore 为空时直接返回原 system, 不空就拼一块"已确认事实".
-     */
-    private static SystemMessage composeSystemMessage(SystemMessage original, KeyFactStore facts) {
-        String factsText = facts.render();
-        if (factsText.isEmpty()) return original;
-        return SystemMessage.from(original.text() + "\n\n" + factsText);
-    }
 
     /**
      * 从后往前找第 K 个"带 tool requests 的 AiMessage", 把那之前的消息全部丢掉.

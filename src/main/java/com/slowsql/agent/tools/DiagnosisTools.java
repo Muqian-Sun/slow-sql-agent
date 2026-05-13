@@ -1,5 +1,7 @@
 package com.slowsql.agent.tools;
 
+import com.slowsql.agent.agent.memory.KeyFact;
+import com.slowsql.agent.agent.memory.KeyFactStore;
 import com.slowsql.agent.eval.AgentStatsListener;
 import dev.langchain4j.agent.tool.P;
 import dev.langchain4j.agent.tool.Tool;
@@ -7,6 +9,9 @@ import dev.langchain4j.agent.tool.Tool;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -26,10 +31,17 @@ public class DiagnosisTools {
 
     private final ToolBackend backend;
     private final AgentStatsListener stats;
+    private final KeyFactStore factStore;
 
-    public DiagnosisTools(ToolBackend backend, AgentStatsListener stats) {
+    public DiagnosisTools(ToolBackend backend, AgentStatsListener stats, KeyFactStore factStore) {
         this.backend = Objects.requireNonNull(backend);
         this.stats = Objects.requireNonNull(stats);
+        this.factStore = Objects.requireNonNull(factStore);
+    }
+
+    /** 兼容旧调用 — 用空 KeyFactStore. 仅用于不需要 recallFacts 的 mock 链路. */
+    public DiagnosisTools(ToolBackend backend, AgentStatsListener stats) {
+        this(backend, stats, new KeyFactStore());
     }
 
     @Tool("返回指定表的 schema 与索引信息. 输出 JSON: " +
@@ -106,6 +118,35 @@ public class DiagnosisTools {
         } catch (Exception e) {
             stats.onToolFailure("internal_error");
             return VerifyResult.error("internal_error", e.getMessage()).toJson();
+        }
+    }
+
+    @Tool("查询本次诊断过程中已累积的'关键事实'摘要 — 来自之前每次 getTableInfo / runExplain / " +
+            "verifyResultEquivalence 返回时自动抽出的紧凑 fact (schema/plan/verify 三大类). " +
+            "用法: 当你调过多次工具, 想用一条压缩摘要刷新记忆(而不是重读原始大 JSON), 调一次 recallFacts. " +
+            "可选传 category 过滤: 'schema' / 'plan' / 'verify' / 空串=全部. " +
+            "输出 JSON: {status:'ok', total_count, facts:[{category, subject, detail}, ...]}.")
+    public String recallFacts(
+            @P("可选 category 过滤: schema / plan / verify, 或空串取全部") String category) {
+        stats.onToolCall("recallFacts", fp(category));
+        try {
+            List<KeyFact> snap = factStore.snapshot();
+            if (category != null && !category.isBlank()) {
+                String wanted = category.trim();
+                snap = snap.stream().filter(f -> wanted.equals(f.category())).toList();
+            }
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("status", "ok");
+            body.put("total_count", snap.size());
+            body.put("facts", snap);
+            return ToolJson.toJson(body);
+        } catch (Exception e) {
+            stats.onToolFailure("internal_error");
+            Map<String, Object> err = new LinkedHashMap<>();
+            err.put("status", "error");
+            err.put("reason", "internal_error");
+            err.put("message", e.getMessage());
+            return ToolJson.toJson(err);
         }
     }
 

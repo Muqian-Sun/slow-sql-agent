@@ -1,5 +1,7 @@
 package com.slowsql.agent.agent;
 
+import com.slowsql.agent.agent.memory.FactExtractor;
+import com.slowsql.agent.agent.memory.KeyFactStore;
 import com.slowsql.agent.agent.memory.LayeredChatMemory;
 import com.slowsql.agent.eval.AgentStatsListener;
 import com.slowsql.agent.llm.ChatModelFactory;
@@ -24,11 +26,15 @@ import java.util.List;
  *
  * ChatMemory (v1):
  *   LayeredChatMemory 替代 LangChain4j 默认 MessageWindow:
- *     - SystemMessage 每轮重组, 把 KeyFactStore 累积的事实拼到末尾 (LLM 始终能看到 schema/plan/verify 三类关键信息)
+ *     - SystemMessage / UserMessage 永远保留, 不动 system 内容 — fact 改由 LLM 主动调
+ *       recallFacts 工具拉取 (pull 而非 push), 这样 LLM 自己决定什么时候要 fact 摘要.
  *     - ToolExecutionResultMessage 进入 memory 时由 FactExtractor 解析 JSON, 抽出紧凑事实
- *     - 旧 ReAct 周期整体丢弃 (按 cycle 截断, 默认保留最近 3 个)
- *   效果: token 不再随轮次线性增长, 稳定在 system+facts+3 cycles 量级.
- *   生命周期: 每个 diagnose() 用新 memory (每 case 独立, 无跨调用泄漏).
+ *       到共享的 KeyFactStore.
+ *     - 旧 ReAct 周期整体丢弃 (按 cycle 截断, 默认保留最近 3 个).
+ *   KeyFactStore 在 LayeredChatMemory 和 DiagnosisTools 之间共享: memory 负责写,
+ *   recallFacts 工具负责读.
+ *   效果: token 不再随轮次线性增长; LLM 想要 fact 摘要时调 recallFacts, 不想要就跳过.
+ *   生命周期: 每个 diagnose() 用新 memory + 新 KeyFactStore (每 case 独立, 无跨调用泄漏).
  *
  * 单次 diagnose() 期间内部统计独立, 评测时 EvalRunner 为每个 case 新建一个实例.
  */
@@ -43,8 +49,13 @@ public class LangChain4jDiagnosisAgent implements DiagnosisAgent {
         ChatModel model = ChatModelFactory.build(
                 llmConfig,
                 List.of(new StatsCollectingListener(stats)));
-        DiagnosisTools tools = new DiagnosisTools(toolBackend, stats);
-        this.chatMemory = new LayeredChatMemory("diagnose-" + System.nanoTime());
+        // 共享 KeyFactStore: memory 端在 FactExtractor 里写, tools 端在 recallFacts 里读.
+        KeyFactStore factStore = new KeyFactStore();
+        DiagnosisTools tools = new DiagnosisTools(toolBackend, stats, factStore);
+        this.chatMemory = new LayeredChatMemory(
+                "diagnose-" + System.nanoTime(),
+                LayeredChatMemory.DEFAULT_KEEP_CYCLES,
+                factStore, new FactExtractor());
         this.advisor = AiServices.builder(DeepPaginationAdvisor.class)
                 .chatModel(model)
                 .tools(tools)

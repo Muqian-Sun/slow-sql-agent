@@ -34,20 +34,24 @@ class LayeredChatMemoryTest {
     }
 
     @Test
-    void factsAreAppendedToSystemMessage() {
+    void factsAreExtractedToStoreButNotInjectedIntoSystem() {
+        // 新语义: facts 只入 KeyFactStore 不自动注入 system, 由 LLM 主动调 recallFacts 拉.
         LayeredChatMemory mem = new LayeredChatMemory("t");
         mem.add(SystemMessage.from("SYS_BASE"));
         mem.add(UserMessage.from("USR"));
 
-        // 模拟 ToolExecutionResultMessage 触发 fact 抽取
         mem.add(aiToolCall("tool-call-1", "getTableInfo"));
         mem.add(ToolExecutionResultMessage.from("tool-call-1", "getTableInfo",
                 "{\"status\":\"ok\",\"table\":\"orders\",\"indexes\":[{\"name\":\"PRIMARY\",\"unique\":true,\"columns\":[\"id\"]}],\"estimated_rows\":1000000}"));
 
+        // system 保持原样, 不掺 facts
         SystemMessage sys = (SystemMessage) mem.messages().get(0);
-        assertThat(sys.text()).contains("SYS_BASE");
-        assertThat(sys.text()).contains("已确认事实");
-        assertThat(sys.text()).contains("table=orders");
+        assertThat(sys.text()).isEqualTo("SYS_BASE");
+        assertThat(sys.text()).doesNotContain("已确认事实");
+
+        // facts 进入 KeyFactStore, 由 recallFacts 工具暴露
+        assertThat(mem.factStore().size()).isEqualTo(1);
+        assertThat(mem.factStore().render()).contains("table=orders");
     }
 
     @Test
