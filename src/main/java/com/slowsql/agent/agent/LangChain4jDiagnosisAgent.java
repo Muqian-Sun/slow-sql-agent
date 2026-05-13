@@ -1,5 +1,6 @@
 package com.slowsql.agent.agent;
 
+import com.slowsql.agent.agent.memory.LayeredChatMemory;
 import com.slowsql.agent.eval.AgentStatsListener;
 import com.slowsql.agent.llm.ChatModelFactory;
 import com.slowsql.agent.llm.LlmConfig;
@@ -18,12 +19,16 @@ import java.util.List;
  *   ChatModel (OpenAI-compat, 接 MiMo / DeepSeek 等)
  *     ↳ ChatModelListener (StatsCollectingListener) — 记录每轮 token / 失败
  *     ↳ Tools (DiagnosisTools) — getTableInfo / runExplain / verifyResultEquivalence
+ *     ↳ LayeredChatMemory — 三段式 ChatMemory: system+facts / user / 最近 3 cycles
  *     ↳ DeepPaginationAdvisor 接口 — 由 AiServices 反射生成实现
  *
- * ChatMemory:
- *   不显式配置, 走 LangChain4j 默认行为 — 单次 diagnose() 调用内部全量保留所有 ReAct
- *   消息 (无窗口截断); 跨 diagnose() 调用不保留(每个 case 独立). 这是符合预期的:
- *   每个评测 case 是隔离上下文, 不需要历史记忆.
+ * ChatMemory (v1):
+ *   LayeredChatMemory 替代 LangChain4j 默认 MessageWindow:
+ *     - SystemMessage 每轮重组, 把 KeyFactStore 累积的事实拼到末尾 (LLM 始终能看到 schema/plan/verify 三类关键信息)
+ *     - ToolExecutionResultMessage 进入 memory 时由 FactExtractor 解析 JSON, 抽出紧凑事实
+ *     - 旧 ReAct 周期整体丢弃 (按 cycle 截断, 默认保留最近 3 个)
+ *   效果: token 不再随轮次线性增长, 稳定在 system+facts+3 cycles 量级.
+ *   生命周期: 每个 diagnose() 用新 memory (每 case 独立, 无跨调用泄漏).
  *
  * 单次 diagnose() 期间内部统计独立, 评测时 EvalRunner 为每个 case 新建一个实例.
  */
@@ -31,6 +36,7 @@ public class LangChain4jDiagnosisAgent implements DiagnosisAgent {
 
     private final DeepPaginationAdvisor advisor;
     private final AgentStatsListener stats;
+    private final LayeredChatMemory chatMemory;
 
     public LangChain4jDiagnosisAgent(LlmConfig llmConfig, ToolBackend toolBackend) {
         this.stats = new AgentStatsListener();
@@ -38,9 +44,11 @@ public class LangChain4jDiagnosisAgent implements DiagnosisAgent {
                 llmConfig,
                 List.of(new StatsCollectingListener(stats)));
         DiagnosisTools tools = new DiagnosisTools(toolBackend, stats);
+        this.chatMemory = new LayeredChatMemory("diagnose-" + System.nanoTime());
         this.advisor = AiServices.builder(DeepPaginationAdvisor.class)
                 .chatModel(model)
                 .tools(tools)
+                .chatMemory(chatMemory)
                 .build();
     }
 
@@ -54,6 +62,11 @@ public class LangChain4jDiagnosisAgent implements DiagnosisAgent {
     /** 暴露统计供 EvalRunner / 报告层读. */
     public AgentStatsListener stats() {
         return stats;
+    }
+
+    /** 暴露 chatMemory 给评测层观察累积事实数量等. */
+    public LayeredChatMemory chatMemory() {
+        return chatMemory;
     }
 
     private static String renderUserPrompt(String sql, BusinessContext ctx) {
