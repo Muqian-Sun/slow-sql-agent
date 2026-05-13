@@ -231,9 +231,10 @@ public class JdbcToolBackend implements ToolBackend {
         sortedNew.sort(String::compareTo);
         if (sortedOrig.equals(sortedNew)) {
             return VerifyResult.failRowHash("order_mismatch", subtype, n, firstDiff, diffCount,
-                    "ORDER BY 不稳定, 建议追加 PK 作 tie-breaker");
+                    String.format("rows=%d, diff_count=%d, set equal but order differs", n, diffCount));
         }
-        return VerifyResult.failRowHash("content_mismatch", subtype, n, firstDiff, diffCount, null);
+        return VerifyResult.failRowHash("content_mismatch", subtype, n, firstDiff, diffCount,
+                String.format("rows=%d, first_diff_at_index=%d, diff_count=%d", n, firstDiff, diffCount));
     }
 
     /**
@@ -290,17 +291,22 @@ public class JdbcToolBackend implements ToolBackend {
                     softWarnings);
         }
 
-        // 3) 拉原 SQL plan 算 reduction(仅供 LLM 参考, 失败不阻塞 PASS)
+        // 3) 拉原 SQL plan 算 reduction(失败不阻塞 PASS, null 让 Jackson 跳过)
         List<VerifyResult.PlanRow> originalPlan = safeExplainPlan(conn, originalSql);
-        long originalRowsEst = originalPlan == null ? 0 :
-                originalPlan.stream().mapToLong(p -> p.rows() == null ? 0 : Math.max(p.rows(), 0)).sum();
-        Double reductionPct = (originalRowsEst > 0)
-                ? 100.0 * (originalRowsEst - rewrittenRowsEst) / originalRowsEst
-                : null;
+        Long originalRowsEst = null;
+        Double reductionPct = null;
+        if (originalPlan != null) {
+            long sum = originalPlan.stream()
+                    .mapToLong(p -> p.rows() == null ? 0 : Math.max(p.rows(), 0))
+                    .sum();
+            originalRowsEst = sum;
+            if (sum > 0) {
+                reductionPct = 100.0 * (sum - rewrittenRowsEst) / sum;
+            }
+        }
         return VerifyResult.passCursorPlan(
                 rewrittenPlan, originalPlan,
-                rewrittenRowsEst, originalRowsEst,
-                reductionPct == null ? 0.0 : reductionPct,
+                rewrittenRowsEst, originalRowsEst, reductionPct,
                 softWarnings);
     }
 
@@ -346,9 +352,11 @@ public class JdbcToolBackend implements ToolBackend {
             try (ResultSet rs = st.executeQuery("EXPLAIN " + sql)) {
                 ResultSetMetaData md = rs.getMetaData();
                 int cols = md.getColumnCount();
+                // MySQL EXPLAIN 列名大小写混杂 (select_type, Extra 等), 这里统一 lowercase
+                // 跟 ToolJson 整体 snake_case 风格对齐.
                 String[] colNames = new String[cols + 1];
                 for (int c = 1; c <= cols; c++) {
-                    colNames[c] = md.getColumnLabel(c);
+                    colNames[c] = md.getColumnLabel(c).toLowerCase(Locale.ROOT);
                 }
                 List<Map<String, Object>> out = new ArrayList<>();
                 while (rs.next()) {

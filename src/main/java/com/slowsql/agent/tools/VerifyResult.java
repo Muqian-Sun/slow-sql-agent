@@ -18,13 +18,16 @@ import java.util.List;
  *
  *   fail + row_hash:
  *     strategy, reason (row_count_diff | content_mismatch | order_mismatch),
- *     row_hash_subtype, sampled_rows, first_diff_row_index, diff_row_count, hint
+ *     row_hash_subtype, sampled_rows, first_diff_row_index, diff_row_count, message, hint
  *   fail + cursor_plan_validity:
- *     strategy, reason (cursor_plan_invalid | missing_order_by | explain_empty),
- *     rewritten_plan, warnings, hint
+ *     strategy, reason (cursor_plan_invalid | missing_order_by | explain_returned_empty),
+ *     rewritten_plan, warnings, message, hint
  *
  *   error:
- *     reason (syntax_error | internal_error | original_sql_unsafe | rewritten_sql_unsafe), message
+ *     reason (syntax_error | internal_error | original_sql_unsafe | rewritten_sql_unsafe),
+ *     message, hint
+ *
+ * 约定: message 描述"发生了什么"(具体细节), hint 描述"怎么修"(从 HintCatalog 按 reason 取).
  */
 public record VerifyResult(
         String status,
@@ -71,28 +74,42 @@ public record VerifyResult(
                 sampledRows, null, null, rewrittenPlan, null, null, null, null, List.of());
     }
 
+    /**
+     * message: 描述本次失败的具体细节(eg "original=N vs rewritten=M");
+     * hint:    永远从 HintCatalog 取, 给 LLM 修复方向. 调用方不再传 hint, 避免把
+     *          描述误塞进 hint 覆盖 catalog 的可操作建议.
+     */
     public static VerifyResult failRowHash(String reason, String subtype, int sampledRows,
-                                           Integer firstDiff, Integer diffCount, String hint) {
-        return new VerifyResult("fail", "row_hash", reason, null,
-                hint != null ? hint : HintCatalog.hintFor(reason),
+                                           Integer firstDiff, Integer diffCount, String message) {
+        return new VerifyResult("fail", "row_hash", reason, message,
+                HintCatalog.hintFor(reason),
                 subtype, sampledRows, firstDiff, diffCount, null, null, null, null, null, null);
     }
 
+    /**
+     * rewrittenRows 一定有(改写 plan 必拿到);
+     * originalRows / reductionPct 在拿不到原 SQL plan 时为 null —
+     * 让 Jackson NON_NULL 跳过, 不要压成 0 误导 LLM "无改进".
+     */
     public static VerifyResult passCursorPlan(List<PlanRow> rewrittenPlan,
                                               List<PlanRow> originalPlan,
-                                              long rewrittenRows, long originalRows,
-                                              double reductionPct,
+                                              long rewrittenRows,
+                                              Long originalRows,
+                                              Double reductionPct,
                                               List<String> warnings) {
         return new VerifyResult("pass", "cursor_plan_validity", null, null, null, null,
                 null, null, null, rewrittenPlan, originalPlan, rewrittenRows, originalRows,
                 reductionPct, warnings);
     }
 
-    public static VerifyResult failCursorPlan(String reason, String hint,
+    /**
+     * message: 描述具体硬伤(eg "table=orders 全表扫"); hint 永远从 catalog 取.
+     */
+    public static VerifyResult failCursorPlan(String reason, String message,
                                               List<PlanRow> rewrittenPlan,
                                               List<String> warnings) {
-        return new VerifyResult("fail", "cursor_plan_validity", reason, null,
-                hint != null ? hint : HintCatalog.hintFor(reason),
+        return new VerifyResult("fail", "cursor_plan_validity", reason, message,
+                HintCatalog.hintFor(reason),
                 null, null, null, null, rewrittenPlan, null, null, null, null,
                 warnings == null ? List.of() : warnings);
     }

@@ -25,14 +25,11 @@ public final class HintCatalog {
                     "对象不存在或不在当前 schema. 检查拼写, 不要猜可能的表名 — 优先看原 SQL 引用了哪张表."),
 
             // ---------- runExplain / SqlSafety ----------
+            // 注: SqlSafety 的细分原因(only_select_or_with_allowed / ddl_or_dml_not_allowed /
+            //     multiple_statements_not_allowed)被塞到 result.message, reason 统一是 safety_rejected,
+            //     这里只配 safety_rejected 的 hint, 不重复.
             Map.entry("safety_rejected",
                     "工具只接 SELECT/WITH 单语句. 检查是否含 DML(UPDATE/DELETE/INSERT 等)或多条用分号串接的语句."),
-            Map.entry("only_select_or_with_allowed",
-                    "改写必须以 SELECT 或 WITH 开头, 不能是 DML 或其它语句."),
-            Map.entry("ddl_or_dml_not_allowed",
-                    "改写不能含 UPDATE/DELETE/INSERT/DROP 等 DDL/DML 关键字."),
-            Map.entry("multiple_statements_not_allowed",
-                    "改写只能是单条 SQL, 末尾分号可有可无, 但分号后不能再有内容."),
             Map.entry("empty_sql",
                     "传入了空 SQL, 检查参数."),
 
