@@ -1,0 +1,375 @@
+{
+  "version": "v3.0",
+  "schema_version": "v2.0",
+  "stable_since": "2026-05",
+  "description": "20 条慢 SQL 评测黄金集 - 专注 MySQL 深分页场景。整个项目周期内保持不变,作为长期评测基准。任何修改需更新 CHANGELOG 并重跑历史 baseline。",
+  "scope": "针对 MySQL 深分页(LIMIT offset 较大)的慢查询优化。其他类型慢 SQL(缺索引/索引失效/OLAP等)期望 Agent 标 UNSUPPORTED,不在本评测覆盖范围。",
+  "expected_outcome_legend": {
+    "rewritten_deferred_join": "应改写为延迟关联(子查询取 PK + 外层 JOIN 反查)",
+    "rewritten_cursor": "应改写为游标分页(WHERE pk > last_id),需业务可改 API",
+    "suggest_index": "应给出索引建议(改写需先加索引才有效)",
+    "no_optimization_needed": "应识别 offset 不大不算深分页,不必优化",
+    "unsupported": "应明确标 UNSUPPORTED 并给方向性建议"
+  },
+  "cases": [
+    {
+      "id": "case_dp_s_001",
+      "complexity": "simple",
+      "tags": ["deep_pagination", "single_table", "pk_ordered"],
+      "input": {
+        "sql": "SELECT id, user_id, amount, create_time FROM orders ORDER BY id LIMIT 1000000, 20",
+        "schema_required": ["orders"],
+        "data_volume_hint": "orders ~1000万行,LIMIT offset 100万,深分页核心 case"
+      },
+      "expected": {
+        "expected_outcome": "rewritten_deferred_join",
+        "min_cost_reduction_percent": 80,
+        "must_pass_verification": true,
+        "notes_for_evaluator": "标准延迟关联:SELECT t.* FROM orders t JOIN (SELECT id FROM orders ORDER BY id LIMIT 1000000, 20) sub ON t.id=sub.id"
+      },
+      "notes": "深分页最基础 case,Agent 应稳定通过"
+    },
+    {
+      "id": "case_dp_s_002",
+      "complexity": "simple",
+      "tags": ["deep_pagination", "single_table", "with_where"],
+      "input": {
+        "sql": "SELECT id, user_id, amount FROM orders WHERE create_time > '2024-01-01' ORDER BY id LIMIT 500000, 50",
+        "schema_required": ["orders"],
+        "data_volume_hint": "带 WHERE 谓词的深分页,offset 50 万"
+      },
+      "expected": {
+        "expected_outcome": "rewritten_deferred_join",
+        "min_cost_reduction_percent": 70,
+        "must_pass_verification": true,
+        "notes_for_evaluator": "WHERE 谓词在 idx_create_time 上,子查询应覆盖索引"
+      },
+      "notes": "带过滤的深分页,生产高频"
+    },
+    {
+      "id": "case_dp_s_003",
+      "complexity": "simple",
+      "tags": ["deep_pagination", "select_star"],
+      "input": {
+        "sql": "SELECT * FROM orders WHERE status = 1 ORDER BY id LIMIT 200000, 100",
+        "schema_required": ["orders"],
+        "data_volume_hint": "SELECT * + 深分页,回表代价大"
+      },
+      "expected": {
+        "expected_outcome": "rewritten_deferred_join",
+        "min_cost_reduction_percent": 70,
+        "must_pass_verification": true,
+        "notes_for_evaluator": "应延迟关联,同时可提示业务精简 SELECT 列"
+      },
+      "notes": "SELECT * + 深分页组合,常见反模式"
+    },
+    {
+      "id": "case_dp_s_004",
+      "complexity": "simple",
+      "tags": ["deep_pagination", "single_table", "large_table"],
+      "input": {
+        "sql": "SELECT id, user_id, action_type, target_id FROM user_actions ORDER BY id LIMIT 800000, 30",
+        "schema_required": ["user_actions"],
+        "data_volume_hint": "user_actions ~1500万,offset 80 万"
+      },
+      "expected": {
+        "expected_outcome": "rewritten_deferred_join",
+        "min_cost_reduction_percent": 80,
+        "must_pass_verification": true,
+        "notes_for_evaluator": "大表深分页,延迟关联收益显著"
+      },
+      "notes": "1500w 行级别的深分页"
+    },
+    {
+      "id": "case_dp_s_005",
+      "complexity": "simple",
+      "tags": ["deep_pagination", "select_star", "text_field"],
+      "input": {
+        "sql": "SELECT * FROM reviews ORDER BY id DESC LIMIT 300000, 20",
+        "schema_required": ["reviews"],
+        "data_volume_hint": "reviews 含 content TEXT 字段,SELECT * + 深分页双重代价"
+      },
+      "expected": {
+        "expected_outcome": "rewritten_deferred_join",
+        "min_cost_reduction_percent": 75,
+        "must_pass_verification": true,
+        "notes_for_evaluator": "延迟关联 + 强烈建议避开 TEXT 字段"
+      },
+      "notes": "TEXT 字段下深分页"
+    },
+    {
+      "id": "case_dp_s_006",
+      "complexity": "simple",
+      "tags": ["deep_pagination", "where_and_orderby_different"],
+      "input": {
+        "sql": "SELECT id, name, price FROM products WHERE category_id = 99 ORDER BY id LIMIT 100000, 50",
+        "schema_required": ["products"],
+        "data_volume_hint": "WHERE category + ORDER BY id 深分页"
+      },
+      "expected": {
+        "expected_outcome": "rewritten_deferred_join",
+        "min_cost_reduction_percent": 60,
+        "must_pass_verification": true,
+        "notes_for_evaluator": "延迟关联,子查询走 idx_category 后排序"
+      },
+      "notes": "WHERE 列和 ORDER BY 列不同"
+    },
+    {
+      "id": "case_dp_m_001",
+      "complexity": "medium",
+      "tags": ["deep_pagination", "join_2_tables"],
+      "input": {
+        "sql": "SELECT o.id, o.amount, u.name FROM orders o JOIN users u ON o.user_id = u.id WHERE o.create_time > '2024-01-01' ORDER BY o.id DESC LIMIT 100000, 20",
+        "schema_required": ["orders", "users"],
+        "data_volume_hint": "2 表 JOIN + 深分页,业界高频"
+      },
+      "expected": {
+        "expected_outcome": "rewritten_deferred_join",
+        "min_cost_reduction_percent": 70,
+        "must_pass_verification": true,
+        "notes_for_evaluator": "先在 orders 上深分页拿 20 个 id,再 JOIN users。两步法是关键"
+      },
+      "notes": "JOIN 深分页,LLM 改写质量分水岭"
+    },
+    {
+      "id": "case_dp_m_002",
+      "complexity": "medium",
+      "tags": ["deep_pagination", "join_2_tables", "1_to_n"],
+      "input": {
+        "sql": "SELECT o.id, o.amount, oi.product_id, oi.quantity FROM orders o JOIN order_items oi ON o.id = oi.order_id WHERE o.status = 1 ORDER BY o.id LIMIT 200000, 30",
+        "schema_required": ["orders", "order_items"],
+        "data_volume_hint": "orders 1对N order_items,JOIN 后行数膨胀"
+      },
+      "expected": {
+        "expected_outcome": "rewritten_deferred_join",
+        "min_cost_reduction_percent": 60,
+        "must_pass_verification": true,
+        "notes_for_evaluator": "1 对 N 关系下,延迟关联要在 orders 上分页(取 30 个 order),再 JOIN items 拿明细。注意此时返回行数 > 30(每订单多 items)"
+      },
+      "notes": "1对N JOIN + 深分页,LLM 容易在哪个表分页搞错"
+    },
+    {
+      "id": "case_dp_m_003",
+      "complexity": "medium",
+      "tags": ["deep_pagination", "order_by_join_table"],
+      "input": {
+        "sql": "SELECT o.id, o.amount, u.name FROM orders o JOIN users u ON o.user_id = u.id ORDER BY u.register_time LIMIT 100000, 20",
+        "schema_required": ["orders", "users"],
+        "data_volume_hint": "排序键在 JOIN 表上,延迟关联效果差"
+      },
+      "expected": {
+        "expected_outcome": "unsupported",
+        "acceptable_outcomes": ["unsupported", "suggest_index"],
+        "min_cost_reduction_percent": null,
+        "must_pass_verification": false,
+        "notes_for_evaluator": "排序在 users.register_time 而非主表 orders,延迟关联无法绕过 100000 次回表。可接受:1)标 unsupported 建议改业务 2)建议在 users.register_time + JOIN 关系上加复合索引"
+      },
+      "notes": "排序在非主表,深分页改写的边界 case"
+    },
+    {
+      "id": "case_dp_m_004",
+      "complexity": "medium",
+      "tags": ["deep_pagination", "join_2_tables"],
+      "input": {
+        "sql": "SELECT r.id, r.rating, p.name FROM reviews r JOIN products p ON r.product_id = p.id WHERE p.category_id = 99 ORDER BY r.id LIMIT 100000, 20",
+        "schema_required": ["reviews", "products"],
+        "data_volume_hint": "JOIN + WHERE 在右表 + 深分页"
+      },
+      "expected": {
+        "expected_outcome": "rewritten_deferred_join",
+        "min_cost_reduction_percent": 60,
+        "must_pass_verification": true,
+        "notes_for_evaluator": "需要 LLM 想清楚:子查询要保留 JOIN 条件 + WHERE 谓词。延迟关联 SQL 较复杂"
+      },
+      "notes": "JOIN 条件依赖右表过滤的深分页"
+    },
+    {
+      "id": "case_dp_c_001",
+      "complexity": "complex",
+      "tags": ["deep_pagination", "join_4_tables", "highlight"],
+      "input": {
+        "sql": "SELECT o.id, u.name, p.name AS product_name, oi.quantity FROM orders o JOIN users u ON o.user_id = u.id JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id WHERE o.create_time > '2024-01-01' ORDER BY o.id DESC LIMIT 100000, 20",
+        "schema_required": ["orders", "users", "order_items", "products"],
+        "data_volume_hint": "4 表 JOIN + 深分页,典型订单详情列表深翻页"
+      },
+      "expected": {
+        "expected_outcome": "rewritten_deferred_join",
+        "min_cost_reduction_percent": 70,
+        "must_pass_verification": true,
+        "notes_for_evaluator": "★ 亮点 case。正确改写: 子查询先在 orders 上做深分页拿 20 个 id,再 JOIN 其他三张表"
+      },
+      "notes": "4 表 JOIN + 深分页,典型复杂多表深分页场景"
+    },
+    {
+      "id": "case_dp_c_002",
+      "complexity": "complex",
+      "tags": ["deep_pagination", "join_5_tables"],
+      "input": {
+        "sql": "SELECT o.id, u.name, p.name, m.name AS merchant_name, c.name AS category_name, oi.quantity FROM orders o JOIN users u ON o.user_id = u.id JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id JOIN merchants m ON p.merchant_id = m.id JOIN categories c ON p.category_id = c.id WHERE o.create_time > '2024-01-01' ORDER BY o.id DESC LIMIT 50000, 20",
+        "schema_required": ["orders", "users", "order_items", "products", "merchants", "categories"],
+        "data_volume_hint": "5 表 JOIN + 深分页,完整电商订单视图"
+      },
+      "expected": {
+        "expected_outcome": "rewritten_deferred_join",
+        "min_cost_reduction_percent": 65,
+        "must_pass_verification": true,
+        "notes_for_evaluator": "同 case_dp_c_001,但 JOIN 链更长。改写后子查询只跑一次 5万 offset,外层 JOIN 5 表只针对 20 行"
+      },
+      "notes": "复杂场景上限"
+    },
+    {
+      "id": "case_dp_t_001",
+      "complexity": "medium",
+      "tags": ["deep_pagination", "tie_breaker_required"],
+      "input": {
+        "sql": "SELECT id, user_id, amount FROM orders WHERE status = 1 ORDER BY create_time DESC LIMIT 100000, 20",
+        "schema_required": ["orders"],
+        "data_volume_hint": "ORDER BY create_time 非 PK,同时间订单可能重复,LIMIT OFFSET 不稳定"
+      },
+      "expected": {
+        "expected_outcome": "rewritten_deferred_join",
+        "min_cost_reduction_percent": 60,
+        "must_pass_verification": false,
+        "notes_for_evaluator": "延迟关联 + 在 ORDER BY 末尾加 id 作 tie-breaker(ORDER BY create_time DESC, id DESC)。assumptions 必须显式声明引入了排序细化"
+      },
+      "notes": "ORDER BY 非 PK,需 tie-breaker。verify 可能 UNDETERMINED(原 SQL 本身不稳定)"
+    },
+    {
+      "id": "case_dp_t_002",
+      "complexity": "medium",
+      "tags": ["deep_pagination", "multi_orderby", "tie_breaker_required"],
+      "input": {
+        "sql": "SELECT id, user_id, amount FROM orders ORDER BY status DESC, create_time DESC LIMIT 100000, 20",
+        "schema_required": ["orders"],
+        "data_volume_hint": "多列 ORDER BY,但 (status, create_time) 仍可能有重复,LIMIT OFFSET 不稳定"
+      },
+      "expected": {
+        "expected_outcome": "rewritten_deferred_join",
+        "min_cost_reduction_percent": 50,
+        "must_pass_verification": false,
+        "notes_for_evaluator": "延迟关联 + 追加 id DESC 作最终 tie-breaker(ORDER BY status DESC, create_time DESC, id DESC)"
+      },
+      "notes": "多列 ORDER BY 仍不唯一,tie-breaker 适用"
+    },
+    {
+      "id": "case_dp_api_001",
+      "complexity": "medium",
+      "tags": ["deep_pagination", "can_modify_api", "cursor_preferred"],
+      "input": {
+        "sql": "SELECT id, user_id, amount, create_time FROM orders WHERE user_id = 100 ORDER BY id LIMIT 100000, 20",
+        "schema_required": ["orders"],
+        "data_volume_hint": "业务允许改 API,可推荐游标分页",
+        "business_context": {
+          "can_modify_api": true,
+          "ui_pattern": "infinite_scroll"
+        }
+      },
+      "expected": {
+        "expected_outcome": "rewritten_cursor",
+        "acceptable_outcomes": ["rewritten_cursor", "rewritten_deferred_join"],
+        "min_cost_reduction_percent": 90,
+        "must_pass_verification": true,
+        "notes_for_evaluator": "★ 业务能改 API + 无限滚动 UI,游标分页性能最优(WHERE id > :last_id ORDER BY id LIMIT 20)。assumptions 声明改写改了 API 语义"
+      },
+      "notes": "业务能改 API,推荐游标"
+    },
+    {
+      "id": "case_dp_api_002",
+      "complexity": "medium",
+      "tags": ["deep_pagination", "can_modify_api", "realtime"],
+      "input": {
+        "sql": "SELECT id, user_id, amount FROM orders ORDER BY id DESC LIMIT 200000, 30",
+        "schema_required": ["orders"],
+        "data_volume_hint": "业务能改 API + 数据要求实时,游标最优",
+        "business_context": {
+          "can_modify_api": true,
+          "data_freshness": "realtime"
+        }
+      },
+      "expected": {
+        "expected_outcome": "rewritten_cursor",
+        "min_cost_reduction_percent": 90,
+        "must_pass_verification": true,
+        "notes_for_evaluator": "游标分页,不引入缓存方案(实时性要求)"
+      },
+      "notes": "业务约束驱动选游标"
+    },
+    {
+      "id": "case_dp_noapi_001",
+      "complexity": "medium",
+      "tags": ["deep_pagination", "cannot_modify_api"],
+      "input": {
+        "sql": "SELECT * FROM orders ORDER BY id LIMIT 500000, 50",
+        "schema_required": ["orders"],
+        "data_volume_hint": "业务不能改 API,只能延迟关联",
+        "business_context": {
+          "can_modify_api": false
+        }
+      },
+      "expected": {
+        "expected_outcome": "rewritten_deferred_join",
+        "min_cost_reduction_percent": 75,
+        "must_pass_verification": true,
+        "notes_for_evaluator": "明确不能改 API → 排除游标分页,选延迟关联"
+      },
+      "notes": "业务约束决定选延迟关联"
+    },
+    {
+      "id": "case_dp_noapi_002",
+      "complexity": "medium",
+      "tags": ["deep_pagination", "cannot_modify_api", "pagination_ui"],
+      "input": {
+        "sql": "SELECT id, amount, create_time FROM orders WHERE status = 1 ORDER BY id LIMIT 300000, 20",
+        "schema_required": ["orders"],
+        "data_volume_hint": "老业务跳页 UI,深翻页用户体验也差",
+        "business_context": {
+          "can_modify_api": false,
+          "ui_pattern": "pagination"
+        }
+      },
+      "expected": {
+        "expected_outcome": "rewritten_deferred_join",
+        "min_cost_reduction_percent": 70,
+        "must_pass_verification": true,
+        "notes_for_evaluator": "延迟关联 + additional_suggestions 提示业务:'深翻页 > 100 页用户体验差,建议产品层加最大页码限制'"
+      },
+      "notes": "跳页 UI,延迟关联 + 业务方向建议"
+    },
+    {
+      "id": "case_dp_neg_001",
+      "complexity": "simple",
+      "tags": ["not_deep_pagination", "small_offset", "克制力"],
+      "input": {
+        "sql": "SELECT id, user_id, amount FROM orders ORDER BY id LIMIT 100, 20",
+        "schema_required": ["orders"],
+        "data_volume_hint": "offset=100,不算深分页"
+      },
+      "expected": {
+        "expected_outcome": "no_optimization_needed",
+        "acceptable_outcomes": ["no_optimization_needed"],
+        "min_cost_reduction_percent": 0,
+        "must_pass_verification": false,
+        "notes_for_evaluator": "★ 反向 case:offset=100 不属于深分页(扫描代价小),Agent 应识别不必优化。测克制力"
+      },
+      "notes": "offset 不大不算深分页,测 Agent 不滥优化"
+    },
+    {
+      "id": "case_dp_idx_001",
+      "complexity": "medium",
+      "tags": ["deep_pagination", "missing_index_for_rewrite"],
+      "input": {
+        "sql": "SELECT id, user_id, rating FROM reviews WHERE product_id = 100 ORDER BY rating DESC LIMIT 100000, 20",
+        "schema_required": ["reviews"],
+        "data_volume_hint": "rating 列无索引,即使做延迟关联子查询也无法走索引"
+      },
+      "expected": {
+        "expected_outcome": "suggest_index",
+        "acceptable_outcomes": ["suggest_index", "rewritten_deferred_join"],
+        "min_cost_reduction_percent": 50,
+        "must_pass_verification": false,
+        "notes_for_evaluator": "改写延迟关联依赖子查询走索引,但 ORDER BY rating 无索引。同时建议加 idx_product_rating(product_id, rating) 才能让改写真正生效"
+      },
+      "notes": "改写 + 索引建议组合,生产真实场景"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+# Maven
+target/
+*.jar
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.iws
+
+# Mac
+.DS_Store
+
+# Env
+.env
+
+# Eval output
+eval-reports/
