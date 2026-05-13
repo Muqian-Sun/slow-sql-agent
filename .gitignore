@@ -16,3 +16,6 @@ target/
 
 # Eval output
 eval-reports/
+
+# Local agent conventions (not for public repo)
+CLAUDE.md
