@@ -86,6 +86,7 @@ public class LangChain4jDiagnosisAgent implements DiagnosisAgent {
     private final AgentStatsListener stats;
     private final ChatMemory chatMemory;
     private final MemoryStrategy memoryStrategy;
+    private final com.slowsql.agent.tracing.TraceCollector trace;
 
     public LangChain4jDiagnosisAgent(LlmConfig llmConfig, ToolBackend toolBackend) {
         this(llmConfig, toolBackend, MemoryStrategy.LAYERED);
@@ -102,6 +103,7 @@ public class LangChain4jDiagnosisAgent implements DiagnosisAgent {
             LlmConfig llmConfig, ToolBackend toolBackend, MemoryStrategy strategy) {
         this.memoryStrategy = strategy;
         this.stats = new AgentStatsListener();
+        this.trace = new com.slowsql.agent.tracing.TraceCollector();
         ChatModel model = ChatModelFactory.build(
                 llmConfig,
                 List.of(new StatsCollectingListener(stats)));
@@ -109,7 +111,7 @@ public class LangChain4jDiagnosisAgent implements DiagnosisAgent {
         // BASELINE 路径不用 KeyFactStore, 但 DiagnosisTools 仍持有一个空 store 让 recallFacts
         // 工具继续可用 (baseline 调 recallFacts 永远拿空集 — 与"baseline 没有事实库"语义吻合).
         KeyFactStore factStore = new KeyFactStore();
-        DiagnosisTools tools = new DiagnosisTools(toolBackend, stats, factStore);
+        DiagnosisTools tools = new DiagnosisTools(toolBackend, stats, factStore, trace);
         this.chatMemory = buildMemory(strategy, factStore, model);
         this.advisor = AiServices.builder(DeepPaginationAdvisor.class)
                 .chatModel(model)
@@ -174,6 +176,11 @@ public class LangChain4jDiagnosisAgent implements DiagnosisAgent {
     /** 暴露 chatMemory 给评测层观察累积事实数量等. */
     public ChatMemory chatMemory() {
         return chatMemory;
+    }
+
+    /** 暴露 TraceCollector 给 EvalRunner 跑完 case 后落 trace JSON. */
+    public com.slowsql.agent.tracing.TraceCollector trace() {
+        return trace;
     }
 
     public MemoryStrategy memoryStrategy() {

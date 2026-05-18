@@ -79,6 +79,7 @@ public class EvalRunner {
 
     private RunResult runSingle(GoldenCase c, int iteration) {
         long t0 = System.nanoTime();
+        java.time.Instant startedAt = java.time.Instant.now();
         // 每个 case 拿全新 agent — AgentStatsListener 不跨 case 累加, 行为指标干净.
         DiagnosisAgent agent = agentFactory.get();
 
@@ -131,6 +132,8 @@ public class EvalRunner {
                     c.id(), diagnosis.outcome(), stats.reactRounds(), stats.totalTokens(),
                     elapsed, stats.toolCallCountByName(), verifyStatus);
 
+            writeTrace(agent, c.id(), iteration, startedAt, elapsed, /*err*/ null);
+
             return new RunResult(
                     c.id(), iteration, diagnosis, c.expected().expectedOutcome(),
                     outcomeMatched, costReduction, verifyPassed, verifyStatus, compliant,
@@ -156,8 +159,30 @@ public class EvalRunner {
             } else {
                 log.error("  FAILED case={} latency={}ms: {}", c.id(), elapsed, e.getMessage());
             }
+            writeTrace(agent, c.id(), iteration, startedAt, elapsed, e.getMessage());
             return RunResult.errorWithStats(c.id(), iteration, c.expected().expectedOutcome(),
                     elapsed, e.getMessage(), stats, summarizerInvocations);
+        }
+    }
+
+    /**
+     * 把单 case 跑出来的 trace events 落盘成独立 JSON. 失败 case 也写, 文件名含 caseId+iter+ts.
+     * 写盘失败仅记 warn, 不影响主流程.
+     */
+    private void writeTrace(DiagnosisAgent agent, String caseId, int iteration,
+                            java.time.Instant startedAt, long totalDurationMs, String errorMessage) {
+        if (!(agent instanceof LangChain4jDiagnosisAgent l4j)) return;
+        var trace = l4j.trace();
+        if (trace == null || trace.isNoOp() || trace.size() == 0) return;
+        var events = trace.snapshot();
+        var runTrace = errorMessage == null
+                ? com.slowsql.agent.tracing.RunTrace.success(caseId, iteration, startedAt, totalDurationMs, events)
+                : com.slowsql.agent.tracing.RunTrace.failure(caseId, iteration, startedAt, totalDurationMs, errorMessage, events);
+        try {
+            var path = runTrace.writeJson(java.nio.file.Path.of("target/eval-traces"));
+            log.debug("  trace written: {} ({} events)", path, events.size());
+        } catch (java.io.IOException ioe) {
+            log.warn("  trace write failed for case={}: {}", caseId, ioe.getMessage());
         }
     }
 
