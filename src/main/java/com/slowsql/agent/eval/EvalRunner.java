@@ -122,18 +122,42 @@ public class EvalRunner {
 
             boolean compliant = isBusinessContextCompliant(ctx.requirement(), diagnosis.outcome());
 
+            // summarizer 触发次数: 非 LangChain4j 实现 / BASELINE 策略下恒为 0.
+            int summarizerInvocations = (agent instanceof LangChain4jDiagnosisAgent l4jForMem)
+                    ? l4jForMem.summarizerInvocations()
+                    : 0;
+
+            log.info("  done case={} outcome={} rounds={} tokens={} latency={}ms tools={} verify={}",
+                    c.id(), diagnosis.outcome(), stats.reactRounds(), stats.totalTokens(),
+                    elapsed, stats.toolCallCountByName(), verifyStatus);
+
             return new RunResult(
-                    c.id(), iteration, diagnosis,
+                    c.id(), iteration, diagnosis, c.expected().expectedOutcome(),
                     outcomeMatched, costReduction, verifyPassed, verifyStatus, compliant,
+                    verifyPassed ? stats.lastVerifySpeedupX() : null,
                     stats.reactRounds(), stats.totalToolCalls(), stats.repeatedToolCalls(),
+                    summarizerInvocations,
                     stats.failuresByReason(),
                     stats.totalTokens(), elapsed,
                     null);
 
         } catch (Exception e) {
-            log.error("  Run failed for case={}: {}", c.id(), e.getMessage());
             long elapsed = (System.nanoTime() - t0) / 1_000_000;
-            return RunResult.error(c.id(), iteration, elapsed, e.getMessage());
+            // 失败 case 仍保留已累积 stats: 工具上限 / framework 上限触发前 LLM 已经跑了若干轮,
+            // 把那些数据丢掉会让失败 case 完全黑盒, 无法诊断"是第几次工具调用炸的".
+            AgentStatsListener stats = (agent instanceof LangChain4jDiagnosisAgent l4j) ? l4j.stats() : null;
+            int summarizerInvocations = (agent instanceof LangChain4jDiagnosisAgent l4jForMem)
+                    ? l4jForMem.summarizerInvocations() : 0;
+            // 失败时把"撞墙前已调用的工具明细"放进日志, 比单看 e.getMessage() 信息密度高得多.
+            if (stats != null) {
+                log.error("  FAILED case={} after rounds={} tools={} tokens={} latency={}ms: {}",
+                        c.id(), stats.reactRounds(), stats.toolCallCountByName(),
+                        stats.totalTokens(), elapsed, e.getMessage());
+            } else {
+                log.error("  FAILED case={} latency={}ms: {}", c.id(), elapsed, e.getMessage());
+            }
+            return RunResult.errorWithStats(c.id(), iteration, c.expected().expectedOutcome(),
+                    elapsed, e.getMessage(), stats, summarizerInvocations);
         }
     }
 

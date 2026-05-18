@@ -24,6 +24,8 @@ public class AgentStatsListener {
     private int verifyFailCount = 0;
     // 最近一次 verify PASS 拿到的 cost reduction%(cursor / deferred_join 都可能填), 用于 cost_reduction_median 真指标
     private Double lastVerifyReductionPct = null;
+    // 最近一次 verify PASS 的 speedup_x (仅 row_hash 路径有真值, cursor 路径恒 null) — DBA 视角最直接的"改写有效性"信号
+    private Double lastVerifySpeedupX = null;
 
     public void onLlmResponse(long tokens) {
         reactRounds++;
@@ -40,14 +42,15 @@ public class AgentStatsListener {
     }
 
     /**
-     * verify 工具调用结果上报. pass=true 时累计 verifyPassCount, 并记录 reductionPct(可空).
+     * verify 工具调用结果上报. pass=true 时累计 verifyPassCount, 并记录 reductionPct + speedupX (都可空).
      * 注: status='error' 的情况由 onToolFailure 单独走 — 不算 pass 也不算 fail.
      */
-    public void onVerifyResult(boolean pass, Double reductionPct) {
+    public void onVerifyResult(boolean pass, Double reductionPct, Double speedupX) {
         verifyCallCount++;
         if (pass) {
             verifyPassCount++;
             if (reductionPct != null) lastVerifyReductionPct = reductionPct;
+            if (speedupX != null) lastVerifySpeedupX = speedupX;
         } else {
             verifyFailCount++;
         }
@@ -59,6 +62,7 @@ public class AgentStatsListener {
     public int verifyPassCount() { return verifyPassCount; }
     public int verifyFailCount() { return verifyFailCount; }
     public Double lastVerifyReductionPct() { return lastVerifyReductionPct; }
+    public Double lastVerifySpeedupX() { return lastVerifySpeedupX; }
 
     public int totalToolCalls() {
         return toolCallCount.values().stream().mapToInt(Integer::intValue).sum();
@@ -75,5 +79,13 @@ public class AgentStatsListener {
 
     public Map<String, Integer> failuresByReason() {
         return Map.copyOf(failuresByReason);
+    }
+
+    /**
+     * 每个工具的调用次数明细 (toolName → count). 用于 EvalRunner 输出汇总日志 /
+     * 失败 case 诊断 "是哪个工具撞了上限". 总数 = totalToolCalls.
+     */
+    public Map<String, Integer> toolCallCountByName() {
+        return Map.copyOf(toolCallCount);
     }
 }

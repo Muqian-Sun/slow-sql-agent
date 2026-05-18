@@ -13,6 +13,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * LangChain4j @Tool 容器 — Agent 通过反射可见的三个工具.
@@ -29,9 +30,25 @@ import java.util.Objects;
  */
 public class DiagnosisTools {
 
+    /**
+     * 单 case 内每个工具的累计调用上限. 超过后工具直接返回 tool_call_limit_exceeded
+     * 引导 LLM 降级, 防"verify_fail → 改写 → 又 fail" 这类 ReAct 死循环耗尽 30 轮.
+     *
+     * 取值依据 (dj_006 实测 trace, 5表 JOIN deferred_join 典型路径):
+     *   - getTableInfo: 6 张表 schema 收集 + 4 次容错回查 buffer = 10
+     *   - runExplain:   原 SQL + 至多 5 次改写预检 buffer = 6
+     *   - verify:       3 次改写重试上限 — 第 3 次仍 fail 说明改写思路不对, 应降级 unsupported
+     *   - recallFacts:  5 次刷新足够覆盖全程, 多了说明 LLM 在打转
+     */
+    public static final int LIMIT_GET_TABLE_INFO = 10;
+    public static final int LIMIT_RUN_EXPLAIN = 6;
+    public static final int LIMIT_VERIFY = 3;
+    public static final int LIMIT_RECALL_FACTS = 5;
+
     private final ToolBackend backend;
     private final AgentStatsListener stats;
     private final KeyFactStore factStore;
+    private final Map<String, Integer> callCount = new ConcurrentHashMap<>();
 
     public DiagnosisTools(ToolBackend backend, AgentStatsListener stats, KeyFactStore factStore) {
         this.backend = Objects.requireNonNull(backend);
@@ -50,6 +67,7 @@ public class DiagnosisTools {
     public String getTableInfo(
             @P("表名, 例如 orders / users / products") String tableName) {
         stats.onToolCall("getTableInfo", fp(tableName));
+        checkLimit("getTableInfo", LIMIT_GET_TABLE_INFO);
         try {
             TableInfoResult r = backend.describeTable(tableName);
             if (r.isError()) {
@@ -68,6 +86,7 @@ public class DiagnosisTools {
     public String runExplain(
             @P("待诊断的 SQL, 必须是合法可解析的查询语句") String sql) {
         stats.onToolCall("runExplain", fp(sql));
+        checkLimit("runExplain", LIMIT_RUN_EXPLAIN);
         try {
             ExplainResult r = backend.explain(sql);
             if (r.isError()) {
@@ -102,6 +121,7 @@ public class DiagnosisTools {
             @P("原始 SQL") String originalSql,
             @P("改写后的 SQL") String rewrittenSql) {
         stats.onToolCall("verifyResultEquivalence", fp(rewrittenSql));
+        checkLimit("verifyResultEquivalence", LIMIT_VERIFY);
         try {
             VerifyResult r = backend.verifyEquivalence(originalSql, rewrittenSql);
             // error 不算 pass 也不算 fail, 只上报失败原因 — 让评测层区分"agent 写得太烂导致 verify 跑不起来"
@@ -109,7 +129,7 @@ public class DiagnosisTools {
             if (r.isError()) {
                 stats.onToolFailure(r.reason());
             } else {
-                stats.onVerifyResult(r.isPass(), r.rowsReductionPct());
+                stats.onVerifyResult(r.isPass(), r.rowsReductionPct(), r.speedupX());
                 if (r.isFail()) {
                     stats.onToolFailure("verify_fail");
                 }
@@ -129,6 +149,7 @@ public class DiagnosisTools {
     public String recallFacts(
             @P("可选 category 过滤: schema / plan / verify, 或空串取全部") String category) {
         stats.onToolCall("recallFacts", fp(category));
+        checkLimit("recallFacts", LIMIT_RECALL_FACTS);
         try {
             List<KeyFact> snap = factStore.snapshot();
             if (category != null && !category.isBlank()) {
@@ -147,6 +168,18 @@ public class DiagnosisTools {
             err.put("reason", "internal_error");
             err.put("message", e.getMessage());
             return ToolJson.toJson(err);
+        }
+    }
+
+    /**
+     * 累计调用 +1, 严格大于 limit 时抛 ToolCallLimitExceededException — 等同 LangChain4j
+     * maxSequentialToolsInvocations 的硬熔断, 由 LangChain4jDiagnosisAgent 的
+     * toolExecutionErrorHandler 重抛后冒泡, 强制中断本次诊断.
+     */
+    private void checkLimit(String toolName, int limit) {
+        int n = callCount.merge(toolName, 1, Integer::sum);
+        if (n > limit) {
+            throw new ToolCallLimitExceededException(toolName, limit);
         }
     }
 
