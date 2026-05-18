@@ -107,6 +107,36 @@ class DiagnosisToolsCallLimitTest {
     }
 
     @Test
+    void verifyHasGlobalCapAcrossDistinctRewrites() {
+        // verify 独享的全局上限: 不论参数, 累计 > LIMIT_VERIFY_TOTAL 抛.
+        // 防"无限写不同改写"失控 — 其他工具不需要这种兜底.
+        DiagnosisTools t = tools();
+        for (int i = 0; i < DiagnosisTools.LIMIT_VERIFY_TOTAL; i++) {
+            // 每次都用不同 SQL, per-args 上限拦不住
+            assertThat(t.verifyResultEquivalence(
+                    "SELECT 1", "SELECT 1 /*v" + i + "*/")).isNotEmpty();
+        }
+        // 第 LIMIT_VERIFY_TOTAL+1 次抛
+        assertThatThrownBy(() -> t.verifyResultEquivalence("SELECT 1", "SELECT 1 /*overflow*/"))
+                .isInstanceOf(ToolCallLimitExceededException.class)
+                .hasMessageContaining("verifyResultEquivalence")
+                .hasMessageContaining(String.valueOf(DiagnosisTools.LIMIT_VERIFY_TOTAL));
+    }
+
+    @Test
+    void otherToolsNotAffectedByVerifyTotalLimit() {
+        // verify 累计上限不影响其他工具的配额
+        DiagnosisTools t = tools();
+        for (int i = 0; i < DiagnosisTools.LIMIT_VERIFY_TOTAL; i++) {
+            t.verifyResultEquivalence("SELECT 1", "SELECT 1 /*v" + i + "*/");
+        }
+        // verify 已到全局上限, getTableInfo / runExplain / recallFacts 仍能正常工作
+        assertThat(t.getTableInfo("orders")).isNotEmpty();
+        assertThat(t.runExplain("SELECT * FROM orders LIMIT 10")).isNotEmpty();
+        assertThat(t.recallFacts("")).isNotEmpty();
+    }
+
+    @Test
     void sameToolDifferentArgsDoNotShareQuota() {
         DiagnosisTools t = tools();
         // 把 verify(SELECT 1, SELECT 1) 打到 3 次 (同参数上限内)

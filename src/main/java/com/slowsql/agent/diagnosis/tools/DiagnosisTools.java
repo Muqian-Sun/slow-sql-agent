@@ -48,10 +48,25 @@ public class DiagnosisTools {
      */
     public static final int LIMIT_PER_TOOL_PARAM = 3;
 
+    /**
+     * verify 工具独享的"全局累计上限" — **不论 rewrittenSql 是什么**, 调用次数 > 此值抛.
+     *
+     * 为什么 verify 需要单独的全局上限:
+     *   - verify 的参数空间无限大 (改写 SQL 任意), per-(tool, args)=3 永远拦不住"LLM 写 N 个
+     *     不同改写都 fail" 这种无效探索. dj_005 实测一次跑 23 个不同改写, ~254k token, 15 分钟.
+     *   - 其他工具参数空间天然有界 (getTableInfo: 表数; recallFacts: 4 个 category;
+     *     runExplain: SQL 但 LLM 一般 3-5 次足够), 不需要这种全局兜底.
+     *
+     * 值的选取: 当前用 15 作为一个"较大但能兜住失控 case"的默认, 后续根据评测数据调.
+     */
+    public static final int LIMIT_VERIFY_TOTAL = 15;
+
     private final ToolBackend backend;
     private final AgentStatsListener stats;
     private final KeyFactStore factStore;
     private final Map<String, Integer> callCount = new ConcurrentHashMap<>();
+    /** verify 累计调用次数 (不论参数), 用于 LIMIT_VERIFY_TOTAL 兜底. */
+    private int verifyTotalCount = 0;
 
     public DiagnosisTools(ToolBackend backend, AgentStatsListener stats, KeyFactStore factStore) {
         this.backend = Objects.requireNonNull(backend);
@@ -128,6 +143,7 @@ public class DiagnosisTools {
         String argsFp = fp(rewrittenSql);
         stats.onToolCall("verifyResultEquivalence", argsFp);
         checkLimit("verifyResultEquivalence", argsFp);
+        checkVerifyTotalLimit();
         try {
             VerifyResult r = backend.verifyEquivalence(originalSql, rewrittenSql);
             // error 不算 pass 也不算 fail, 只上报失败原因 — 让评测层区分"agent 写得太烂导致 verify 跑不起来"
@@ -194,6 +210,17 @@ public class DiagnosisTools {
         int n = callCount.merge(key, 1, Integer::sum);
         if (n > LIMIT_PER_TOOL_PARAM) {
             throw new ToolCallLimitExceededException(toolName, LIMIT_PER_TOOL_PARAM);
+        }
+    }
+
+    /**
+     * verify 全局累计上限兜底 — 防"无限写不同改写"失控. 不论 rewrittenSql 是什么,
+     * 同一 case 内 verify 调用累计 > LIMIT_VERIFY_TOTAL 即抛.
+     */
+    private void checkVerifyTotalLimit() {
+        verifyTotalCount++;
+        if (verifyTotalCount > LIMIT_VERIFY_TOTAL) {
+            throw new ToolCallLimitExceededException("verifyResultEquivalence", LIMIT_VERIFY_TOTAL);
         }
     }
 
