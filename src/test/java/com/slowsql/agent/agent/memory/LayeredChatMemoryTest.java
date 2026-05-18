@@ -256,17 +256,18 @@ class LayeredChatMemoryTest {
     }
 
     @Test
-    void summarizerTriggersByCycleCountEvenWhenTokenThresholdNotReached() {
-        // 高 token 阈值 (永远到不了) + 低 cycle 阈值 (3) → 测 cycle 数触发的常规路径,
+    void summarizerTriggersByToolCallCountEvenWhenTokenThresholdNotReached() {
+        // 高 token 阈值 (永远到不了) + 低 tool-call 阈值 (3) → 测 tool-call 数触发的常规路径,
         // 而不是 token 阈值兜底路径. 防"延迟压缩=永不压缩"回归.
         RecordingSummarizer summarizer = new RecordingSummarizer();
         LayeredChatMemory mem = new LayeredChatMemory(
-                "t", 2, /*tokenThreshold*/ 1_000_000, /*compressAfterCycles*/ 3,
+                "t", 2, /*tokenThreshold*/ 1_000_000, /*compressAfterToolCalls*/ 3,
                 new KeyFactStore(), new FactExtractor(), summarizer);
         mem.add(SystemMessage.from("SYS"));
         mem.add(UserMessage.from("USR"));
 
-        // K=2, compressAfterCycles=3. 加 5 cycle 后: recent 保留最后 2, archive raw 应 ≥ 3 → 触发
+        // K=2, compressAfterToolCalls=3. 5 cycle (5 ToolResult) → recent 保留最后 2 cycle 含 2 ToolResult,
+        // archive 累计 3 ToolResult ≥ 3 → 触发
         for (int i = 1; i <= 5; i++) {
             mem.add(aiToolCall("c-" + i, "runExplain"));
             mem.add(ToolExecutionResultMessage.from("c-" + i, "runExplain",
@@ -279,23 +280,52 @@ class LayeredChatMemoryTest {
     }
 
     @Test
-    void cycleAndTokenThresholdsAreIndependent() {
-        // 一边到 cycle 触发 / 一边到 token 触发, 任一即压
+    void summarizerTriggersOnParallelToolCallsBeforeAiMessageCountReaches() {
+        // 关键回归点: 一个 AiMessage 多个 toolReq (parallel tool calling 场景),
+        // 旧 AiMessage 粒度计数会让阈值永远到不了; tool-call 粒度按 ToolResult 计, 应正确触发.
+        RecordingSummarizer summarizer = new RecordingSummarizer();
+        LayeredChatMemory mem = new LayeredChatMemory(
+                "t", 1, /*tokenThreshold*/ 1_000_000, /*compressAfterToolCalls*/ 3,
+                new KeyFactStore(), new FactExtractor(), summarizer);
+        mem.add(SystemMessage.from("SYS"));
+        mem.add(UserMessage.from("USR"));
+
+        // cycle 1: 一个 AiMessage 含 3 个 toolReq → 3 个 ToolResult 跟随
+        AiMessage parallel = AiMessage.from(
+                ToolExecutionRequest.builder().id("p1").name("getTableInfo").arguments("{}").build(),
+                ToolExecutionRequest.builder().id("p2").name("getTableInfo").arguments("{}").build(),
+                ToolExecutionRequest.builder().id("p3").name("getTableInfo").arguments("{}").build());
+        mem.add(parallel);
+        mem.add(ToolExecutionResultMessage.from("p1", "getTableInfo", "{}"));
+        mem.add(ToolExecutionResultMessage.from("p2", "getTableInfo", "{}"));
+        mem.add(ToolExecutionResultMessage.from("p3", "getTableInfo", "{}"));
+        // cycle 2: 普通单 toolReq
+        mem.add(aiToolCall("c-2", "runExplain"));
+        mem.add(ToolExecutionResultMessage.from("c-2", "runExplain", "{}"));
+
+        // K=1 → recent 保留最后 1 cycle (cycle 2, 1 ToolResult), archive 拿 cycle 1 的 3 ToolResult
+        // 3 ≥ compressAfterToolCalls=3 → 触发. 按旧 AiMessage 计数仅 1 个 cycle, 永远触发不到.
+        assertThat(summarizer.invocations).isNotEmpty();
+    }
+
+    @Test
+    void toolCallAndTokenThresholdsAreIndependent() {
+        // 一边到 tool-call 触发 / 一边到 token 触发, 任一即压
         RecordingSummarizer s1 = new RecordingSummarizer();
-        LayeredChatMemory cycleOnly = new LayeredChatMemory(
+        LayeredChatMemory toolCallOnly = new LayeredChatMemory(
                 "c", 2, 1_000_000, 3,
                 new KeyFactStore(), new FactExtractor(), s1);
-        cycleOnly.add(SystemMessage.from("S"));
-        cycleOnly.add(UserMessage.from("U"));
+        toolCallOnly.add(SystemMessage.from("S"));
+        toolCallOnly.add(UserMessage.from("U"));
         for (int i = 1; i <= 5; i++) {
-            cycleOnly.add(aiToolCall("c-" + i, "runExplain"));
-            cycleOnly.add(ToolExecutionResultMessage.from("c-" + i, "runExplain", "{}"));
+            toolCallOnly.add(aiToolCall("c-" + i, "runExplain"));
+            toolCallOnly.add(ToolExecutionResultMessage.from("c-" + i, "runExplain", "{}"));
         }
         assertThat(s1.invocations).isNotEmpty();
 
         RecordingSummarizer s2 = new RecordingSummarizer();
         LayeredChatMemory tokenOnly = new LayeredChatMemory(
-                "t", 1, 30, /*compressAfterCycles*/ 1_000,
+                "t", 1, 30, /*compressAfterToolCalls*/ 1_000,
                 new KeyFactStore(), new FactExtractor(), s2);
         tokenOnly.add(SystemMessage.from("SYS_PAD_TEXT"));
         tokenOnly.add(UserMessage.from("USR_PAD_TEXT_LONGER"));

@@ -40,14 +40,16 @@ import java.util.Objects;
  *   1. cycle 数超 K → 老 cycle 从 recent **挪到 archive 末尾**(无 LLM 调用, 原样保留)
  *   2. 持续累积, 直到触发任一条件:
  *        a. 估算总 token 超过 tokenThreshold (高保真兜底, 防 prompt 爆窗口)
- *        b. archive 中未压缩 raw cycle 数 ≥ compressAfterCycles (常规路径, 让摘要器在
- *           token 还没爆的中等复杂度 case 上就开始工作, 避免阈值方案在典型 5-12 轮 case
- *           上永远不触发)
+ *        b. archive 中累计 tool call 次数 ≥ compressAfterToolCalls (常规路径).
+ *           粒度按 ToolExecutionResultMessage 计数, 而不是按 AiMessage —
+ *           LLM 启用 parallel tool calls 时一个 AiMessage 可含多个 toolReq /
+ *           对应多个 ToolResult, 按 AiMessage 数算会让复杂 case 永远到不了阈值.
+ *           工具调用次数与"上下文真正堆了多少"线性相关, 是更稳的触发信号.
  *   3. 任一触发 → 整个 archive(旧摘要 + 新 raw) 一起送 LLM 重压, 产出新摘要替换全部
  *
  * 收益:
  *   - 简单 case (≤ keepCycles 轮 ReAct) 永远不进 archive → 0 额外 LLM 成本
- *   - 中等 case 在 compressAfterCycles 触发, 把早期 ReAct 周期压成一条摘要, 控制 prompt 增速
+ *   - 中等 case 在 compressAfterToolCalls 触发, 把早期 ReAct 周期压成一条摘要, 控制 prompt 增速
  *   - 长尾死循环 / 巨型 case 由 tokenThreshold 兜底防爆窗口
  *   - 旧摘要不会"独立堆积"; 始终保持 archive 头部最多一条摘要 + 后续新 raw 的形态
  *
@@ -69,11 +71,12 @@ public class LayeredChatMemory implements ChatMemory {
     public static final int DEFAULT_TOKEN_THRESHOLD = 22_400;
 
     /**
-     * 默认 cycle 数触发阈值. archive 中未压缩 raw cycle ≥ 此值即触发压缩.
-     * 取 5: keepCycles=3 之外再堆 5 个 raw cycle (总 8 轮), 实测 5-12 轮 case 在 token
-     * 阈值之前就能让摘要器跑过, 避免"延迟压缩=永不压缩".
+     * 默认 tool call 触发阈值. archive 中累计 ToolExecutionResultMessage 数 ≥ 此值即触发压缩.
+     * 取 6: dj_005 / dj_006 实测 10-12 tool_calls (parallel 比例 ~1.5-1.7), keepCycles=3
+     * 在 recent 占 3-5 tool calls, archive 堆到 ≥ 6 即触发. 简单 case (≤ 5 tool_calls 总数)
+     * 不触发, 避免额外 LLM 成本.
      */
-    public static final int DEFAULT_COMPRESS_AFTER_CYCLES = 5;
+    public static final int DEFAULT_COMPRESS_AFTER_TOOL_CALLS = 6;
 
     /** 已压缩摘要 SystemMessage 的内容前缀, 用作"这条是已压缩摘要"的标记. */
     private static final String SUMMARY_PREFIX = "=== 历史摘要(早期 ReAct 周期, 已 LLM 语义压缩) ===\n";
@@ -81,7 +84,7 @@ public class LayeredChatMemory implements ChatMemory {
     private final Object id;
     private final int keepCycles;
     private final int tokenThreshold;
-    private final int compressAfterCycles;
+    private final int compressAfterToolCalls;
     private final KeyFactStore factStore;
     private final FactExtractor extractor;
     private final HistorySummarizer summarizer;
@@ -98,13 +101,13 @@ public class LayeredChatMemory implements ChatMemory {
     /** 当前轮: 最近 keepCycles 个完整 ReAct 周期, 原样保留, 永不压缩. */
     private final List<ChatMessage> recent = new ArrayList<>();
 
-    public LayeredChatMemory(Object id, int keepCycles, int tokenThreshold, int compressAfterCycles,
+    public LayeredChatMemory(Object id, int keepCycles, int tokenThreshold, int compressAfterToolCalls,
                              KeyFactStore factStore, FactExtractor extractor,
                              HistorySummarizer summarizer) {
         this.id = Objects.requireNonNull(id);
         this.keepCycles = keepCycles;
         this.tokenThreshold = tokenThreshold;
-        this.compressAfterCycles = compressAfterCycles;
+        this.compressAfterToolCalls = compressAfterToolCalls;
         this.factStore = Objects.requireNonNull(factStore);
         this.extractor = Objects.requireNonNull(extractor);
         this.summarizer = Objects.requireNonNull(summarizer);
@@ -113,25 +116,25 @@ public class LayeredChatMemory implements ChatMemory {
     public LayeredChatMemory(Object id, int keepCycles, int tokenThreshold,
                              KeyFactStore factStore, FactExtractor extractor,
                              HistorySummarizer summarizer) {
-        this(id, keepCycles, tokenThreshold, DEFAULT_COMPRESS_AFTER_CYCLES,
+        this(id, keepCycles, tokenThreshold, DEFAULT_COMPRESS_AFTER_TOOL_CALLS,
                 factStore, extractor, summarizer);
     }
 
     public LayeredChatMemory(Object id, int keepCycles,
                              KeyFactStore factStore, FactExtractor extractor,
                              HistorySummarizer summarizer) {
-        this(id, keepCycles, DEFAULT_TOKEN_THRESHOLD, DEFAULT_COMPRESS_AFTER_CYCLES,
+        this(id, keepCycles, DEFAULT_TOKEN_THRESHOLD, DEFAULT_COMPRESS_AFTER_TOOL_CALLS,
                 factStore, extractor, summarizer);
     }
 
     public LayeredChatMemory(Object id, int keepCycles,
                              KeyFactStore factStore, FactExtractor extractor) {
-        this(id, keepCycles, DEFAULT_TOKEN_THRESHOLD, DEFAULT_COMPRESS_AFTER_CYCLES,
+        this(id, keepCycles, DEFAULT_TOKEN_THRESHOLD, DEFAULT_COMPRESS_AFTER_TOOL_CALLS,
                 factStore, extractor, new NoOpHistorySummarizer());
     }
 
     public LayeredChatMemory(Object id) {
-        this(id, DEFAULT_KEEP_CYCLES, DEFAULT_TOKEN_THRESHOLD, DEFAULT_COMPRESS_AFTER_CYCLES,
+        this(id, DEFAULT_KEEP_CYCLES, DEFAULT_TOKEN_THRESHOLD, DEFAULT_COMPRESS_AFTER_TOOL_CALLS,
                 new KeyFactStore(), new FactExtractor(), new NoOpHistorySummarizer());
     }
 
@@ -156,7 +159,7 @@ public class LayeredChatMemory implements ChatMemory {
         spillOverflowToArchive();
         if (hasRawInArchive()
                 && (estimatedTokens() > tokenThreshold
-                        || rawCyclesInArchive() >= compressAfterCycles)) {
+                        || toolCallsInArchive() >= compressAfterToolCalls)) {
             compressArchive();
         }
     }
@@ -220,15 +223,19 @@ public class LayeredChatMemory implements ChatMemory {
     }
 
     /**
-     * archive 中"未压缩 raw cycle"的数量, 用 AiMessage(toolRequests) 为锚点计数 — 与
-     * spillOverflowToArchive / findKeepFromIndex 的 cycle 定义一致. 已压缩摘要 SystemMessage 不计.
+     * archive 中累计 tool call 次数, 用 ToolExecutionResultMessage 为锚点计数 —
+     * parallel tool calling 下一个 AiMessage 可能产生多条 ToolResult, 按 ToolResult 数算
+     * 与"上下文真正堆了多少"线性相关. 已压缩摘要 SystemMessage 不计.
+     *
+     * 注: spillOverflowToArchive / findKeepFromIndex 仍按 AiMessage 锚点切 ReAct 周期,
+     * 保证 spill 时 cycle 边界对齐 (孤儿 ToolResult 会让 OpenAI 兼容 API 报错).
+     * 压缩触发判断用 tool call 数, spill 用 cycle 数, 两个粒度各取所长.
      */
-    private int rawCyclesInArchive() {
+    private int toolCallsInArchive() {
         int prefix = existingSummaryCount();
         int n = 0;
         for (int i = prefix; i < archive.size(); i++) {
-            ChatMessage m = archive.get(i);
-            if (m instanceof AiMessage ai && ai.hasToolExecutionRequests()) n++;
+            if (archive.get(i) instanceof ToolExecutionResultMessage) n++;
         }
         return n;
     }
