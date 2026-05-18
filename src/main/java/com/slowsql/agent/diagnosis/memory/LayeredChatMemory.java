@@ -46,7 +46,7 @@ import java.util.Objects;
  *    边界, 保证 cycle 完整 (孤儿 ToolResult 会让 OpenAI 兼容 API 报错).
  *
  * 2. archive 压缩 (compressArchive) — 按 token 占比:
- *    估算总 token 超过 tokenThreshold (default 22400, ≈ 32k context 70%) 才
+ *    估算总 token 超过 tokenThreshold (default 11200, ≈ 16k context 70%) 才
  *    触发. 把 archive 里的旧摘要 + 新 raw 一起送 LLM 重压成一条新摘要. 这是
  *    防 prompt 爆窗口的兜底机制, 不要求"必须经常触发" — 典型场景下 recent
  *    + archive 总 token 远低于阈值, summarizer 不会跑, 也不烧 LLM 成本.
@@ -69,10 +69,10 @@ public class LayeredChatMemory implements ChatMemory {
 
     /**
      * 默认 token 阈值. 估算总 token 超过此值才触发 archive 的 LLM 压缩.
-     * 22400 ≈ 32k context 上限的 70%, 给改写 SQL 字符串 + 工具响应留 30% 余量.
-     * 典型场景达不到 (5-12 轮 ReAct 总 token 几 k 量级), 这是兜底机制.
+     * 11200 ≈ 16k context 上限的 70%, 给改写 SQL 字符串 + 工具响应留 30% 余量.
+     * 复杂 case 累积 prompt (system + user + archive + recent) 接近此值时压缩老 cycle.
      */
-    public static final int DEFAULT_TOKEN_THRESHOLD = 22_400;
+    public static final int DEFAULT_TOKEN_THRESHOLD = 11_200;
 
     /** 已压缩摘要 SystemMessage 的内容前缀, 用作"这条是已压缩摘要"的标记. */
     private static final String SUMMARY_PREFIX = "=== 历史摘要(早期 ReAct 周期, 已 LLM 语义压缩) ===\n";
