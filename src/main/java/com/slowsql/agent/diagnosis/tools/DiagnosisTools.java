@@ -37,19 +37,16 @@ import java.util.concurrent.ConcurrentHashMap;
 public class DiagnosisTools {
 
     /**
-     * 单 case 内每个工具的累计调用上限. 超过后工具直接返回 tool_call_limit_exceeded
-     * 引导 LLM 降级, 防"verify_fail → 改写 → 又 fail" 这类 ReAct 死循环耗尽 30 轮.
+     * 同工具 + 同参数 的累计调用上限. 第 4 次同参数调用触发硬熔断,
+     * 防"用相同 SQL 反复试 verify"这类真死循环.
      *
-     * 取值依据 (dj_006 实测 trace, 5表 JOIN deferred_join 典型路径):
-     *   - getTableInfo: 6 张表 schema 收集 + 4 次容错回查 buffer = 10
-     *   - runExplain:   原 SQL + 至多 5 次改写预检 buffer = 6
-     *   - verify:       3 次改写重试上限 — 第 3 次仍 fail 说明改写思路不对, 应降级 unsupported
-     *   - recallFacts:  5 次刷新足够覆盖全程, 多了说明 LLM 在打转
+     * 设计语义: 按"toolName + 参数指纹"独立计数 — LLM 用 3 个不同 SQL 调 verify 各 1 次
+     * 不会撞墙 (那是合理的"换思路重试"); 但用同一 SQL 反复调 ≥ 4 次说明 LLM 困在原地.
+     *
+     * 不再按"工具维度全局上限"算 (历史: LIMIT_VERIFY=3 全局/按工具) — 那种把不同 SQL
+     * 也算累计, 会误判合法的探索为死循环, 让 LLM 写第 4 个不同改写时被直接拦住.
      */
-    public static final int LIMIT_GET_TABLE_INFO = 10;
-    public static final int LIMIT_RUN_EXPLAIN = 6;
-    public static final int LIMIT_VERIFY = 3;
-    public static final int LIMIT_RECALL_FACTS = 5;
+    public static final int LIMIT_PER_TOOL_PARAM = 3;
 
     private final ToolBackend backend;
     private final AgentStatsListener stats;
@@ -72,8 +69,9 @@ public class DiagnosisTools {
             "estimated_rows, row_count_note}. 在判断主键/索引/字段类型前必须先调.")
     public String getTableInfo(
             @P("表名, 例如 orders / users / products") String tableName) {
-        stats.onToolCall("getTableInfo", fp(tableName));
-        checkLimit("getTableInfo", LIMIT_GET_TABLE_INFO);
+        String argsFp = fp(tableName);
+        stats.onToolCall("getTableInfo", argsFp);
+        checkLimit("getTableInfo", argsFp);
         try {
             TableInfoResult r = backend.describeTable(tableName);
             if (r.isError()) {
@@ -91,8 +89,9 @@ public class DiagnosisTools {
             "用于确认是否真的命中深分页扫描.")
     public String runExplain(
             @P("待诊断的 SQL, 必须是合法可解析的查询语句") String sql) {
-        stats.onToolCall("runExplain", fp(sql));
-        checkLimit("runExplain", LIMIT_RUN_EXPLAIN);
+        String argsFp = fp(sql);
+        stats.onToolCall("runExplain", argsFp);
+        checkLimit("runExplain", argsFp);
         try {
             ExplainResult r = backend.explain(sql);
             if (r.isError()) {
@@ -126,8 +125,9 @@ public class DiagnosisTools {
     public String verifyResultEquivalence(
             @P("原始 SQL") String originalSql,
             @P("改写后的 SQL") String rewrittenSql) {
-        stats.onToolCall("verifyResultEquivalence", fp(rewrittenSql));
-        checkLimit("verifyResultEquivalence", LIMIT_VERIFY);
+        String argsFp = fp(rewrittenSql);
+        stats.onToolCall("verifyResultEquivalence", argsFp);
+        checkLimit("verifyResultEquivalence", argsFp);
         try {
             VerifyResult r = backend.verifyEquivalence(originalSql, rewrittenSql);
             // error 不算 pass 也不算 fail, 只上报失败原因 — 让评测层区分"agent 写得太烂导致 verify 跑不起来"
@@ -156,8 +156,9 @@ public class DiagnosisTools {
             "输出 JSON: {status:'ok', total_count, facts:[{category, subject, detail}, ...]}.")
     public String recallFacts(
             @P("可选 category 过滤: schema / plan / verify, 或空串取全部") String category) {
-        stats.onToolCall("recallFacts", fp(category));
-        checkLimit("recallFacts", LIMIT_RECALL_FACTS);
+        String argsFp = fp(category);
+        stats.onToolCall("recallFacts", argsFp);
+        checkLimit("recallFacts", argsFp);
         try {
             List<KeyFact> snap = factStore.snapshot();
             if (category != null && !category.isBlank()) {
@@ -180,14 +181,19 @@ public class DiagnosisTools {
     }
 
     /**
-     * 累计调用 +1, 严格大于 limit 时抛 ToolCallLimitExceededException — 等同 LangChain4j
-     * maxSequentialToolsInvocations 的硬熔断, 由 LangChain4jDiagnosisAgent 的
-     * toolExecutionErrorHandler 重抛后冒泡, 强制中断本次诊断.
+     * 按 "toolName + 参数指纹" 维度累计调用 +1, 严格大于 LIMIT_PER_TOOL_PARAM 时抛
+     * ToolCallLimitExceededException — 等同 LangChain4j maxSequentialToolsInvocations
+     * 的硬熔断, 由 LangChain4jDiagnosisAgent 的 toolExecutionErrorHandler 重抛后冒泡,
+     * 强制中断本次诊断.
+     *
+     * 同一工具不同参数的调用各自独立计数 — LLM 用 3 个不同 SQL 调 verify 不会撞墙,
+     * 只有"用同一 SQL 反复调 verify ≥ 4 次"这种真死循环才触发.
      */
-    private void checkLimit(String toolName, int limit) {
-        int n = callCount.merge(toolName, 1, Integer::sum);
-        if (n > limit) {
-            throw new ToolCallLimitExceededException(toolName, limit);
+    private void checkLimit(String toolName, String argsFp) {
+        String key = toolName + ":" + argsFp;
+        int n = callCount.merge(key, 1, Integer::sum);
+        if (n > LIMIT_PER_TOOL_PARAM) {
+            throw new ToolCallLimitExceededException(toolName, LIMIT_PER_TOOL_PARAM);
         }
     }
 

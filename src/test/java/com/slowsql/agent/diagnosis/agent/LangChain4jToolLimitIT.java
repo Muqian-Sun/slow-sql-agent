@@ -29,7 +29,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * 实现方式:
  *   - Stub ChatModel: 不调用真实 LLM, 每次返回同一个 verifyResultEquivalence 工具请求,
  *     模拟"LLM 死循环调 verify"
- *   - 期望 DiagnosisTools 第 LIMIT_VERIFY+1 次调用抛 ToolCallLimitExceededException,
+ *   - 期望 DiagnosisTools 第 LIMIT_PER_TOOL_PARAM+1 次调用抛 ToolCallLimitExceededException,
  *     经 toolExecutionErrorHandler 重抛后冒泡出 advisor.diagnose()
  *   - 纯本地, 不依赖 MySQL / 任何 LLM endpoint
  */
@@ -62,12 +62,12 @@ class LangChain4jToolLimitIT {
                 .satisfies(e -> {
                     ToolCallLimitExceededException tle = (ToolCallLimitExceededException) e;
                     assertThat(tle.toolName()).isEqualTo("verifyResultEquivalence");
-                    assertThat(tle.limit()).isEqualTo(DiagnosisTools.LIMIT_VERIFY);
+                    assertThat(tle.limit()).isEqualTo(DiagnosisTools.LIMIT_PER_TOOL_PARAM);
                 });
 
-        // 控制 stub 至少被调用过 LIMIT_VERIFY+1 次 — 证明 framework 经过了多轮 tool loop,
+        // 控制 stub 至少被调用过 LIMIT_PER_TOOL_PARAM+1 次 — 证明 framework 经过了多轮 tool loop,
         // 不是在第一次就被 catch 在别处.
-        assertThat(stub.callCount()).isGreaterThan(DiagnosisTools.LIMIT_VERIFY);
+        assertThat(stub.callCount()).isGreaterThan(DiagnosisTools.LIMIT_PER_TOOL_PARAM);
     }
 
     /**
