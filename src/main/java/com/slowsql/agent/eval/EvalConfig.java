@@ -8,7 +8,7 @@ import java.util.List;
  *
  * 4 种典型场景:
  * - Smoke:5 条核心 case × 1 次,~1 分钟,CI PR 用
- * - Full:全量 20 条 × 3 次,~30 分钟,每周跑
+ * - Full:全量 22 条 × 3 次,~30 分钟,每周跑
  * - A/B:全量 × 3 次 × 2 个版本,~1 小时,prompt 改动决策用
  * - Targeted:指定 case × N 次,debug 用
  */

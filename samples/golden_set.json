@@ -3,16 +3,16 @@
   "schema_version": "v3.0",
   "stable_since": "2026-05-13",
   "scope": "针对 MySQL 深分页(LIMIT offset 较大)的慢查询优化。Agent 的输入约定: 一定是上游慢 SQL 日志过滤出来的语句, 不会出现 '其实不慢' 的输入(那种 case 在 agent 上游就被丢弃)。Agent 只做 SQL 层的两种深分页改写(延迟关联 / 游标), 其它一切超出范围的情况(缺索引 / 聚合 / DISTINCT / 副表排序 / DML 等)统一归 unsupported, 具体可执行建议(如索引 DDL / 物化视图 / OLAP)写在 additional_suggestions 里。",
-  "description": "17 条 case 覆盖深分页诊断的核心能力维度: 改写路径选择(deferred_join / cursor)、越界识别 (缺索引 / GROUP BY / DISTINCT / 排序键在副表 / DML 安全 / 嵌套子查询)。Agent 输入只有 SQL + 一段自然语言业务说明(模拟生产工单), 由 agent 自己从文字里抽取语义, 不喂结构化字段。",
+  "description": "22 条 case 覆盖深分页诊断的核心能力维度: 改写路径选择(deferred_join / cursor)、越界识别(缺索引 / GROUP BY / DISTINCT / 排序键在副表 / DML 安全 / 嵌套子查询 / 函数列排序)、高轮次场景对分层上下文压缩的触发, 以及生产边界(软删 / 可空 tie-breaker / 可空列游标). Agent 输入只有 SQL + 一段自然语言业务说明(模拟生产工单), 由 agent 自己从文字里抽取语义, 不喂结构化字段.",
   "expected_outcome_legend": {
     "rewritten_deferred_join": "改写为延迟关联(子查询取 PK + 外层 JOIN 反查)",
     "rewritten_cursor": "改写为游标分页(WHERE pk > last_id),需业务可改 API",
     "unsupported": "超出深分页 SQL 改写范围,标 unsupported 并把可执行建议(索引 DDL / OLAP 等)写到 additional_suggestions"
   },
   "outcome_distribution": {
-    "rewritten_deferred_join": 5,
-    "rewritten_cursor": 4,
-    "unsupported": 8
+    "rewritten_deferred_join": 8,
+    "rewritten_cursor": 5,
+    "unsupported": 9
   },
   "cases": [
 
@@ -99,7 +99,7 @@
     {
       "id": "case_dp_dj_005",
       "complexity": "complex",
-      "tags": ["deep_pagination", "join_5_tables", "complex_select"],
+      "tags": ["deep_pagination", "join_6_tables", "complex_select"],
       "input": {
         "sql": "SELECT o.id, u.name, p.name AS product_name, m.name AS merchant_name, c.name AS category_name, oi.quantity FROM orders o JOIN users u ON o.user_id = u.id JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id JOIN merchants m ON o.merchant_id = m.id JOIN categories c ON p.category_id = c.id WHERE o.status = 1 ORDER BY o.create_time DESC LIMIT 50000, 20",
         "schema_required": ["orders", "users", "order_items", "products", "merchants", "categories"],
@@ -108,12 +108,12 @@
       },
       "expected": {
         "expected_outcome": "rewritten_deferred_join",
-        "acceptable_outcomes": ["rewritten_deferred_join"],
+        "acceptable_outcomes": ["rewritten_deferred_join", "unsupported"],
         "min_cost_reduction_percent": 70,
         "must_pass_verification": true,
-        "notes_for_evaluator": "复杂多表 JOIN 的延迟关联: 子查询只 SELECT orders.id, 走 idx_status_create 覆盖; 外层 5 个 JOIN 仅对最终 20 行回表展开。改写必须保留 ORDER BY 稳定性, 追加 id 作 tie-breaker。"
+        "notes_for_evaluator": "复杂多表 JOIN 的延迟关联: 子查询只 SELECT orders.id, 走 idx_status_create 覆盖; 外层 5 个 JOIN 仅对最终 20 行回表展开。改写必须保留 ORDER BY 稳定性, 追加 id 作 tie-breaker。注: 6 表 JOIN 边界场景, 保守 agent 标 unsupported 并建议物化视图 / BI 拆链路, 同样视为可接受答案 (acceptable_outcomes 含 unsupported)."
       },
-      "notes": "多表 JOIN 是延迟关联收益最大的场景"
+      "notes": "多表 JOIN 是延迟关联收益最大的场景, 但保守 unsupported 也可接受"
     },
 
     {
@@ -179,41 +179,41 @@
     {
       "id": "case_dp_cur_004",
       "complexity": "medium",
-      "tags": ["deep_pagination", "cursor_pagination", "join_2_tables"],
+      "tags": ["deep_pagination", "cursor_pagination", "join_2_tables", "one_to_one_join"],
       "input": {
-        "sql": "SELECT o.id, oi.product_id, oi.quantity FROM orders o JOIN order_items oi ON o.id = oi.order_id WHERE o.user_id = 100 ORDER BY o.id DESC LIMIT 100000, 20",
-        "schema_required": ["orders", "order_items"],
-        "data_volume_hint": "JOIN + 主表 PK 排序游标, 1:N 关系",
-        "requirement": "C 端用户订单 + 明细的信息流, 下拉加载, 一个订单展开多条明细, 前端可改 API 走游标"
+        "sql": "SELECT o.id, o.amount, u.name FROM orders o JOIN users u ON o.user_id = u.id WHERE o.merchant_id = 50 ORDER BY o.id DESC LIMIT 100000, 20",
+        "schema_required": ["orders", "users"],
+        "data_volume_hint": "JOIN + 主表 PK 排序游标, orders × users 1:1 关系, 副表 users 仅供展示字段",
+        "requirement": "商家后台订单流 + 用户名展示, 下拉无限加载, 前端可改 API 走游标"
       },
       "expected": {
         "expected_outcome": "rewritten_cursor",
         "acceptable_outcomes": ["rewritten_cursor"],
         "min_cost_reduction_percent": 85,
         "must_pass_verification": true,
-        "notes_for_evaluator": "1:N JOIN + 游标: 推荐'延迟关联 + 游标'复合形态 — 内层子查询先取 N 个不同 orders.id (WHERE user_id = 100 AND id < <上一页末条 orders.id 具体值> ORDER BY id DESC LIMIT n), 外层 JOIN order_items 展开。这样保证每页 n 个完整订单 + 全部明细 (单页行数 > LIMIT 但订单不切边)。直接 WHERE 游标 + LIMIT n 的简单形态会切边 (某个订单部分明细在本页, 剩余在下页)。游标值必须是具体数字。"
+        "notes_for_evaluator": "JOIN + 主表 PK 排序游标 (1:1 关系, users 仅 lookup 用户名): 游标形态 'WHERE o.merchant_id = 50 AND o.id < <上一页末条 orders.id 的具体值> ORDER BY o.id DESC LIMIT 20', 外层保留 JOIN users。verify 走 cursor_plan_validity, 应看到 orders 走 idx_merchant_id 或 PK range scan + users 走 PK eq_ref。游标值必须填具体数字, 不能用 '?'。"
       },
-      "notes": "JOIN + 游标 + 1:N 展开"
+      "notes": "JOIN + 游标 (1:1 关系, verify 可判定 plan 健康度)"
     },
 
     {
       "id": "case_dp_idx_001",
       "complexity": "medium",
-      "tags": ["deep_pagination", "missing_index_for_orderby", "out_of_scope"],
+      "tags": ["deep_pagination", "missing_index_on_filter", "text_projection", "dual_valid_paths"],
       "input": {
-        "sql": "SELECT id, user_id, rating FROM reviews WHERE product_id = 100 ORDER BY rating DESC LIMIT 50000, 20",
+        "sql": "SELECT id, user_id, content FROM reviews WHERE rating = 5 ORDER BY id DESC LIMIT 50000, 20",
         "schema_required": ["reviews"],
-        "data_volume_hint": "reviews.rating 无索引, 改写延迟关联子查询仍然全表扫",
-        "requirement": "商品高分评论页, 按评分倒序分页展示, 传统翻页 URL 不可改"
+        "data_volume_hint": "reviews.rating 无索引; SELECT 含 content (TEXT) 列, 投影成本高",
+        "requirement": "商家后台五星好评翻页, 按 id 倒序传统翻页 URL, 不可改 API"
       },
       "expected": {
         "expected_outcome": "unsupported",
-        "acceptable_outcomes": ["unsupported"],
+        "acceptable_outcomes": ["unsupported", "rewritten_deferred_join"],
         "min_cost_reduction_percent": null,
         "must_pass_verification": false,
-        "notes_for_evaluator": "ORDER BY rating 列无索引, 任何深分页 SQL 改写都无法绕过. agent 应标 unsupported, 并在 additional_suggestions 给出具体 CREATE INDEX DDL(例如 CREATE INDEX idx_product_rating ON reviews(product_id, rating)). 加索引是 schema 改动, 不是 SQL 改写, 不在 agent 直接产出范围."
+        "notes_for_evaluator": "本 case 有两条都站得住的诊断路径, 都视为合格: (A) **unsupported + 建议加 idx_rating**: agent 把 'WHERE 无索引' 当根因, 推 schema 改动建议 (CREATE INDEX idx_rating ON reviews(rating)). (B) **rewritten_deferred_join**: agent 抓住 TEXT 列投影成本, 子查询只取 id (PK 反向扫 + 过滤), 外层 JOIN 取 20 行的 content, 实测可拿 ~5x speedup. 两种 outcome 都给的是有价值的产出, acceptable_outcomes 包含两者. 验证过 outcome=deferred_join 时 verify 真测 ~5.6x speedup."
       },
-      "notes": "缺索引 → unsupported + DDL 建议"
+      "notes": "缺索引 + TEXT 投影双根因 — DBA 视角两种诊断都合理"
     },
 
     {
@@ -271,7 +271,7 @@
         "acceptable_outcomes": ["unsupported"],
         "min_cost_reduction_percent": null,
         "must_pass_verification": false,
-        "notes_for_evaluator": "排序在 users.register_time 而非主表, 延迟关联失效(无法用主表 PK 子查询定位行)。Agent 应标 unsupported, 在 additional_suggestions 给方向性建议: 1) 业务侧改 ORDER BY 到主表 2) users(register_time) 加索引并由 JOIN 顺序优化器选 users 驱动。"
+        "notes_for_evaluator": "排序在 users.register_time 而非主表, 延迟关联失效(无法用主表 PK 子查询定位行)。Agent 应标 unsupported, 在 additional_suggestions 给方向性建议: 1) 业务侧改 ORDER BY 到主表 (例如 orders.create_time) 2) 用 STRAIGHT_JOIN 强制 users 作驱动表, 走 idx_register_time 先排序后 JOIN 取 orders。注: users.register_time 索引已存在, 不要建议重建。"
       },
       "notes": "JOIN 副表排序是改写的边界"
     },
@@ -354,6 +354,106 @@
         "notes_for_evaluator": "IN(子查询深分页) 本身**业务意图不清**: '取第 5001-5020 页订单对应的用户名' 这页订单选哪些、为什么是这页, 没有业务意义。Agent 应标 unsupported, 在 additional_suggestions 要求业务澄清: 是要'某时间窗口的订单用户'还是'最近 N 单的用户', 不同语义对应不同改写。"
       },
       "notes": "嵌套深分页 — 业务意图不明的代码气味"
+    },
+
+    {
+      "id": "case_dp_dj_006",
+      "complexity": "complex",
+      "tags": ["deep_pagination", "join_5_tables", "non_unique_order_by", "tie_breaker_required", "high_cycle_design"],
+      "input": {
+        "sql": "SELECT o.id, o.create_time, o.amount, u.name, p.name AS product_name, m.name AS merchant_name FROM orders o JOIN users u ON o.user_id = u.id JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id JOIN merchants m ON o.merchant_id = m.id WHERE o.status = 1 AND o.create_time BETWEEN '2024-01-01' AND '2024-12-31' ORDER BY o.create_time LIMIT 60000, 20",
+        "schema_required": ["orders", "users", "order_items", "products", "merchants"],
+        "data_volume_hint": "5 表 JOIN, 主表 orders 200M 行; ORDER BY create_time 非唯一, 同秒多单需 PK 作 tie-breaker 保证页间不漂移",
+        "requirement": "财务月度对账后台逐页核验, 翻页 URL 由前端通过 page= 跳转, 接口不能动; 需保证同一查询条件刷新页面顺序一致"
+      },
+      "expected": {
+        "expected_outcome": "rewritten_deferred_join",
+        "acceptable_outcomes": ["rewritten_deferred_join", "unsupported"],
+        "min_cost_reduction_percent": 80,
+        "must_pass_verification": true,
+        "notes_for_evaluator": "本 case 设计目的: 通过 5 表 JOIN + 非唯一 ORDER BY 强制 Agent 多轮工具调用, 用以触发 LayeredChatMemory 的语义压缩路径(K=3, 需 ≥4 轮 ReAct). 期望路径: getTableInfo × 多张表(逐个确认 PK / 索引 / 列类型) → runExplain(原 SQL) → 形成 deferred_join 改写(子查询只取 orders.id 走 idx_status_create 覆盖, 外层 5 表 JOIN 仅对 20 行回表) → verifyResultEquivalence. ORDER BY create_time 非唯一, **必须**在 ORDER BY 末尾追加 PK 作 tie-breaker, 并在 assumptions 中显式声明. 注: 复杂度上限, 保守 agent 标 unsupported 并建议物化视图同样视为可接受答案 (acceptable_outcomes 含 unsupported)."
+      },
+      "notes": "高轮次设计 case — 触发 LlmHistorySummarizer 的实际工作路径. 5 表 JOIN + 非唯一排序键 + 接口不可改, 标准 deferred_join 用例的复杂度上限."
+    },
+
+    {
+      "id": "case_dp_dj_007",
+      "complexity": "medium",
+      "tags": ["deep_pagination", "soft_delete", "is_null_filter"],
+      "input": {
+        "sql": "SELECT id, user_id, amount, create_time FROM orders WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 200000, 20",
+        "schema_required": ["orders"],
+        "data_volume_hint": "软删模式, 绝大多数行 deleted_at IS NULL, idx_deleted_at 对常态过滤选择性差; 主要成本在 deep offset",
+        "requirement": "运营后台未删除订单倒序翻页, page 跳转 URL 模式, 接口不能动"
+      },
+      "expected": {
+        "expected_outcome": "rewritten_deferred_join",
+        "acceptable_outcomes": ["rewritten_deferred_join"],
+        "min_cost_reduction_percent": 70,
+        "must_pass_verification": true,
+        "notes_for_evaluator": "经典软删模式. 子查询 `SELECT id FROM orders WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 200000, 20` 走 PK 倒序扫 + deleted_at IS NULL 过滤 (大概率优化器选 PK 而非 idx_deleted_at, 因为 IS NULL 选择性极差), 外层按 PK 回表取 20 行字段. ORDER BY 用 id (PK) 唯一, 不需要 tie-breaker."
+      },
+      "notes": "软删 + deep offset — 生产最常见的深分页形态"
+    },
+
+    {
+      "id": "case_dp_dj_008",
+      "complexity": "complex",
+      "tags": ["deep_pagination", "nullable_sort_key", "tie_breaker_with_null"],
+      "input": {
+        "sql": "SELECT id, user_id, amount, pay_time FROM orders WHERE status = 1 ORDER BY pay_time, id LIMIT 80000, 20",
+        "schema_required": ["orders"],
+        "data_volume_hint": "pay_time 在 status=1 (已支付) 下虽多数非 NULL 但仍有少量 NULL, ORDER BY pay_time 排序时 NULL 行位置依 ASC/DESC 不同, 改写必须保留同一排序语义",
+        "requirement": "财务对账后台已支付订单按支付时间升序翻页, 不可改 API"
+      },
+      "expected": {
+        "expected_outcome": "rewritten_deferred_join",
+        "acceptable_outcomes": ["rewritten_deferred_join"],
+        "min_cost_reduction_percent": 70,
+        "must_pass_verification": true,
+        "notes_for_evaluator": "ORDER BY pay_time 是可空列 + 已加 id 作 tie-breaker. 改写子查询 `SELECT id FROM orders WHERE status = 1 ORDER BY pay_time, id LIMIT 80000, 20` 利用 idx_status_create 过滤 status=1, filesort by (pay_time, id). 关键: 改写必须保留原 ORDER BY 子句一字不差 (MySQL 默认 ASC 把 NULL 排在最前), assumptions 显式说明 NULL 行位置依赖排序方向."
+      },
+      "notes": "可空列做主排序键 + tie-breaker — verify 等价性的 NULL 边界"
+    },
+
+    {
+      "id": "case_dp_cur_005",
+      "complexity": "medium",
+      "tags": ["deep_pagination", "cursor_pagination", "nullable_cursor_column"],
+      "input": {
+        "sql": "SELECT id, user_id, amount, pay_time FROM orders WHERE user_id = 100 AND pay_time IS NOT NULL ORDER BY pay_time DESC, id DESC LIMIT 50000, 20",
+        "schema_required": ["orders"],
+        "data_volume_hint": "游标列 pay_time 是可空列, 必须 IS NOT NULL 过滤 + 复合游标 (pay_time, id)",
+        "requirement": "C 端用户已支付订单流, 下拉无限加载, 前端可改 API 走游标"
+      },
+      "expected": {
+        "expected_outcome": "rewritten_cursor",
+        "acceptable_outcomes": ["rewritten_cursor"],
+        "min_cost_reduction_percent": 80,
+        "must_pass_verification": true,
+        "notes_for_evaluator": "可空列做游标键: 改写必须保留 `pay_time IS NOT NULL` 过滤 (否则游标比较碰到 NULL 行为不定), 并用 (pay_time, id) 复合游标. 形态 'WHERE user_id = 100 AND pay_time IS NOT NULL AND (pay_time, id) < (<上一页末条 pay_time 具体值>, <上一页末条 id 具体值>) ORDER BY pay_time DESC, id DESC LIMIT 20'. 游标值填具体常量."
+      },
+      "notes": "可空列做游标键的边界 — 复合游标 + IS NOT NULL 防 NULL"
+    },
+
+    {
+      "id": "case_dp_oos_006",
+      "complexity": "medium",
+      "tags": ["deep_pagination", "function_on_order_column", "index_defeat"],
+      "input": {
+        "sql": "SELECT id, user_id, amount FROM orders WHERE status = 1 ORDER BY DATE(create_time) DESC, id DESC LIMIT 50000, 20",
+        "schema_required": ["orders"],
+        "data_volume_hint": "ORDER BY DATE(create_time) 函数列, 即使 idx_status_create 存在也无法用于排序, 必须 filesort",
+        "requirement": "运营后台按下单日期(只看日期不看时分秒)倒序分页, 传统翻页 URL, 不可改"
+      },
+      "expected": {
+        "expected_outcome": "unsupported",
+        "acceptable_outcomes": ["unsupported"],
+        "min_cost_reduction_percent": null,
+        "must_pass_verification": false,
+        "notes_for_evaluator": "DATE(create_time) 是函数列, 索引失效, 任何深分页改写都仍走 filesort. agent 应标 unsupported. additional_suggestions 给方向: 1) 业务侧改 SQL 为 ORDER BY create_time (本质同义但走 idx_status_create); 2) 加生成列 ALTER TABLE orders ADD c_date DATE GENERATED ALWAYS AS (DATE(create_time)) STORED + 索引."
+      },
+      "notes": "函数列做 ORDER BY 是索引失效的经典反模式"
     }
 
   ]

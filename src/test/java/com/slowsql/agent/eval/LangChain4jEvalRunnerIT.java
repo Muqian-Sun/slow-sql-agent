@@ -85,8 +85,8 @@ class LangChain4jEvalRunnerIT {
     }
 
     /**
-     * 全量 17 case × 3 iter 评测 — LLM 采样有波动, 多跑取均值才能拿稳定指标.
-     * 单跑时间约 30 秒, 17 × 3 ≈ 25-35 分钟. CI / 平时跳过, 只在需要新基线时触发.
+     * 全量 22 case × 3 iter 评测 — LLM 采样有波动, 多跑取均值才能拿稳定指标.
+     * 单跑时间约 30 秒, 22 × 3 ≈ 30-45 分钟. CI / 平时跳过, 只在需要新基线时触发.
      */
     @Test
     @Timeout(value = 90, unit = TimeUnit.MINUTES)
@@ -99,10 +99,10 @@ class LangChain4jEvalRunnerIT {
                 Path.of("target/eval-reports"));
 
         EvalReport report = runner.run(config);
-        printSummary("FULL (17 cases × 3 iter)", report);
+        printSummary("FULL (22 cases × 3 iter)", report);
 
-        assertThat(report.totalCases()).isEqualTo(17);
-        assertThat(report.totalRuns()).isEqualTo(51);
+        assertThat(report.totalCases()).isEqualTo(22);
+        assertThat(report.totalRuns()).isEqualTo(66);
     }
 
     private static void printSummary(String label, EvalReport report) {

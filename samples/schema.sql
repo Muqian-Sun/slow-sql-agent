@@ -93,10 +93,12 @@ CREATE TABLE orders (
     create_time     DATETIME        NOT NULL,
     pay_time        DATETIME,
     update_time     DATETIME,
+    deleted_at      DATETIME        DEFAULT NULL    COMMENT '软删时间, NULL=未删除',
     INDEX  idx_user_id          (user_id),
     INDEX  idx_merchant_id      (merchant_id),
     INDEX  idx_create_time      (create_time),
     INDEX  idx_status_create    (status, create_time),
+    INDEX  idx_deleted_at       (deleted_at),
     UNIQUE INDEX uk_order_no    (order_no)
     -- amount / pay_time / update_time 无索引
 ) ENGINE=InnoDB COMMENT='订单 ~1000万';

@@ -26,9 +26,13 @@ public record EvalReport(
 
         // ─── 第 2 层:效果 ───
         double outcomeMatchRate,
+        double rewritePrecision,          // 仅 rewrite 期望的 case 上的命中率, 不被 unsupported 占比稀释
+        double unsupportedRecall,         // 仅 unsupported 期望的 case 上的召回率, 看越界识别能力
         double verificationPassRate,
         double verificationUndeterminedRate,
         double costReductionMedian,
+        double speedupMedian,             // verify row_hash 路径真实双跑加速中位数 (倍数, 1.0 = 没加速)
+        double speedupMax,                // 最大加速倍数, 体现头部 case 改写效果
         double businessContextCompliance,
         double assumptionsExplicitRate,
 
@@ -36,6 +40,7 @@ public record EvalReport(
         double avgReactRounds,
         int maxReactRounds,
         double repeatedToolCallRate,
+        double avgSummarizerInvocations,    // 历史摘要器在评测里平均触发次数, 体现分层上下文是否真的"工作"
         Map<String, Integer> toolFailuresByReason,
 
         // ─── 详细数据 ───
@@ -78,12 +83,38 @@ public record EvalReport(
         double highConf = ratio(all, RunResult::isHighConfidence);
         double assumptionsRate = ratio(all, RunResult::hasExplicitAssumptions);
 
-        double[] sortedCost = all.stream().mapToDouble(RunResult::costReductionPercent).sorted().toArray();
+        // 按 expected 分桶: rewrite_precision (期望 rewrite 的 case 命中率) + unsupported_recall
+        // (期望 unsupported 的 case 命中率). 拆开避免总命中率被 unsupported 占比稀释/抬升.
+        double rewritePrec = ratioWhere(all,
+                r -> r.expectedOutcome() != null && !"unsupported".equals(r.expectedOutcome()),
+                RunResult::outcomeMatched);
+        double unsupRecall = ratioWhere(all,
+                r -> "unsupported".equals(r.expectedOutcome()),
+                RunResult::outcomeMatched);
+
+        // cost_reduction_median 只统计 verify 真通过的样本 — unsupported / errored / NOT_CALLED
+        // 的 costReductionPercent=0 会把 median 拉到底部, 失去"改写带来的成本降幅 median"统计含义.
+        double[] sortedCost = all.stream()
+                .filter(RunResult::verificationPassed)
+                .mapToDouble(RunResult::costReductionPercent)
+                .sorted()
+                .toArray();
         double costMed = median(sortedCost);
+
+        // speedup 只在 verify row_hash 通过的 case 里有真值, 其余 null 跳过
+        double[] sortedSpeedup = all.stream()
+                .map(RunResult::speedupX)
+                .filter(s -> s != null && !s.isNaN() && !s.isInfinite())
+                .mapToDouble(Double::doubleValue).sorted().toArray();
+        double speedupMed = median(sortedSpeedup);
+        double speedupMax = sortedSpeedup.length == 0 ? 0 : sortedSpeedup[sortedSpeedup.length - 1];
 
         int totalCalls = all.stream().mapToInt(RunResult::totalToolCalls).sum();
         int totalRepeats = all.stream().mapToInt(RunResult::repeatedToolCalls).sum();
         double repeatRate = totalCalls == 0 ? 0 : (double) totalRepeats / totalCalls;
+
+        double avgSummarizer = all.stream()
+                .mapToInt(RunResult::summarizerInvocations).average().orElse(0);
 
         // 业务上下文合规率: cursor 改写时检查 requirement 是否允许改 API. 由 EvalRunner.runSingle
         // 调 isBusinessContextCompliant 写入 RunResult.businessContextCompliant, 这里取 ratio.
@@ -107,8 +138,11 @@ public record EvalReport(
                 config.promptVersion(), Instant.now(),
                 resultsPerCase.size(), totalRuns,
                 p95, highConf, 0.0,
-                outcomeMatch, verifyPass, verifyUndet, costMed, businessRate, assumptionsRate,
-                avgRounds, maxRounds, repeatRate, failureMap,
+                outcomeMatch, rewritePrec, unsupRecall,
+                verifyPass, verifyUndet, costMed,
+                speedupMed, speedupMax,
+                businessRate, assumptionsRate,
+                avgRounds, maxRounds, repeatRate, avgSummarizer, failureMap,
                 caseDetails, all);
     }
 
@@ -132,13 +166,23 @@ public record EvalReport(
     private static EvalReport empty(EvalConfig config) {
         return new EvalReport(config.promptVersion(), Instant.now(),
                 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0,
-                0, 0, 0, Map.of(),
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, Map.of(),
                 List.of(), List.of());
     }
 
     private static double ratio(List<RunResult> all, java.util.function.Predicate<RunResult> p) {
         return all.isEmpty() ? 0 : (double) all.stream().filter(p).count() / all.size();
+    }
+
+    /** 在 bucket(满足 bucketFilter 的子集)上算 p 的命中率, bucket 为空时返回 0. */
+    private static double ratioWhere(List<RunResult> all,
+                                     java.util.function.Predicate<RunResult> bucketFilter,
+                                     java.util.function.Predicate<RunResult> p) {
+        long bucketSize = all.stream().filter(bucketFilter).count();
+        if (bucketSize == 0) return 0;
+        long matched = all.stream().filter(bucketFilter).filter(p).count();
+        return (double) matched / bucketSize;
     }
 
     private static double percentile(long[] sorted, double p) {

@@ -29,7 +29,9 @@ public final class SystemPrompts {
               - verifyResultEquivalence(originalSql, rewrittenSql)
                   → {status:'pass'|'fail'|'error', strategy:'row_hash'|'cursor_plan_validity',
                      reason, hint, rewritten_plan, original_plan,
-                     rewritten_rows_estimate, original_rows_estimate, rows_reduction_pct, warnings}
+                     rewritten_rows_estimate, original_rows_estimate, rows_reduction_pct, warnings,
+                     rewritten_latency_ms (两路径都有), original_latency_ms / speedup_x (仅 row_hash 路径有)}
+                  说明: 改写真实耗时由后端自动测量, 无需 agent 另外调工具.
               - recallFacts(category)
                   → {status, total_count, facts:[{category, subject, detail}, ...]}
                   上面三个工具的返回会被自动抽成紧凑 fact 累积到本次诊断的内存里.
@@ -39,7 +41,7 @@ public final class SystemPrompts {
 
             工具调用纪律:
               1. 不要凭空假设 schema, 任何关于"主键/索引/字段"的判断都必须先调 getTableInfo.
-              2. 同一工具同一参数不要重复调用, 先复用上一次结果.
+              2. 同一工具同一参数不要重复调用; verify PASS 后立即输出最终 JSON, 不再调任何工具.
               3. 给出改写方案前, **必须**调用一次 verifyResultEquivalence. 工具按改写形态自动分流:
                  - deferred_join 改写(仍保留 OFFSET): 走行级 hash 等价比对.
                  - cursor 改写(消除 OFFSET, 引入 WHERE pk </>?): 走 plan 健康性校验
@@ -66,10 +68,14 @@ public final class SystemPrompts {
                - 排序键在 JOIN 副表字段 → 延迟关联失效, 建议改业务或调 JOIN 顺序
                - 业务意图不清的嵌套深分页(IN(子查询深分页) 等) → 建议澄清业务意图
 
-            3. EXPLAIN 显示缺关键索引(WHERE / ORDER BY 列没合适索引)
-               → outcome=unsupported. rewritten_sql 留空, additional_suggestions 给完整
-                 CREATE INDEX DDL. 说明: 加索引是 schema 改动而非 SQL 改写, agent 只能建议.
-                 注意低基数列(NDV < 10)必须复合索引才有效, 单独建无意义.
+            3. EXPLAIN 显示 WHERE / ORDER BY 列没可用索引(key=NULL 或 type=ALL)
+               → outcome=unsupported. 即使 deferred_join 子查询能拿 1.5-3x 边际加速,
+                 也优先标 unsupported — 加索引才是根因修复. rewritten_sql 留空,
+                 additional_suggestions 给建议性 CREATE INDEX DDL (措辞用"建议"非"必须").
+
+            3a. ORDER BY 列上含函数(DATE(), UPPER(), 算术运算等) → **必须** outcome=unsupported.
+                函数列索引失效是确定性的, 即使 verify 跑出 speedup 也不要走 deferred_join.
+                additional_suggestions 给"改 SQL 直接用列"或"加生成列 + 索引"方向.
 
             4. 从"业务说明"自然语言里识别 API 修改可行性:
                - "前端可改 / 可改 API / 游标分页 / 无限滚动 / 下拉加载 / 传 last_id" → 业务可改 API

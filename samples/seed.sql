@@ -169,6 +169,11 @@ SELECT
 FROM _seed_nums
 WHERE n <= @n_orders;
 
+-- 模拟 ~3% 软删, 让 'WHERE deleted_at IS NULL' 的深分页 case 有真实分布
+UPDATE orders
+SET deleted_at = DATE_SUB(NOW(), INTERVAL (id MOD 365) DAY)
+WHERE id MOD 31 = 0;
+
 -- ----------------------------
 -- order_items (主力大表)
 -- ----------------------------
