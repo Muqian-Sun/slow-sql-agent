@@ -25,7 +25,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * Token 降幅对照实验 — 真 LLM + 真 MySQL, 跑相同 case 集两遍:
  *   1) LayeredChatMemory (生产路径, 含 LlmHistorySummarizer)
- *   2) MessageWindowChatMemory(maxMessages=10) — LangChain4j 默认滑窗 baseline
+ *   2) ToolCallWindowChatMemory(maxRecentToolCalls=3) — 跟 LayeredChatMemory 同维度的纯滑窗 baseline
  *
  * 输出 target/eval-reports/memory-comparison-*.json 与控制台对照表;
  * "token 占用较默认滑窗的相对降幅" 这一对外结论由本 IT 的产出佐证.
@@ -87,7 +87,7 @@ class MemoryComparisonIT {
                                                     // N=1 抖动会让 reduction 数字不可信 (实测 dj_006
                                                     // 撞 30 上限 vs 10 轮跑完都见过, token 能差 3 倍)
                 "mimo-comparison",
-                "MessageWindowChatMemory(10)",
+                "ToolCallWindowChatMemory(3)",
                 true,
                 Path.of("target/eval-reports"));
 

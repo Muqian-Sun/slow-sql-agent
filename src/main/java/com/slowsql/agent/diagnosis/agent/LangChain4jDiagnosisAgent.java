@@ -8,6 +8,7 @@ import com.slowsql.agent.diagnosis.api.OutcomeType;
 import com.slowsql.agent.diagnosis.memory.FactExtractor;
 import com.slowsql.agent.diagnosis.memory.KeyFactStore;
 import com.slowsql.agent.diagnosis.memory.LayeredChatMemory;
+import com.slowsql.agent.diagnosis.memory.ToolCallWindowChatMemory;
 import com.slowsql.agent.diagnosis.memory.LlmHistorySummarizer;
 import com.slowsql.agent.eval.AgentStatsListener;
 import com.slowsql.agent.llm.ChatModelFactory;
@@ -17,7 +18,6 @@ import com.slowsql.agent.diagnosis.tools.DiagnosisTools;
 import com.slowsql.agent.dbinspect.ToolBackend;
 import com.slowsql.agent.diagnosis.tools.ToolCallLimitExceededException;
 import dev.langchain4j.memory.ChatMemory;
-import dev.langchain4j.memory.chat.MessageWindowChatMemory;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.service.AiServices;
 import dev.langchain4j.service.tool.ToolErrorHandlerResult;
@@ -61,15 +61,21 @@ public class LangChain4jDiagnosisAgent implements DiagnosisAgent {
     /**
      * Memory 装配策略:
      *   LAYERED          - 默认四层 LayeredChatMemory + LlmHistorySummarizer (生产路径)
-     *   BASELINE_WINDOW  - LangChain4j 自带 MessageWindowChatMemory, 仅用于 token 对照实验
+     *   BASELINE_WINDOW  - ToolCallWindowChatMemory 纯滑窗 (按工具调用数算), 用于 token 对照实验.
+     *                      跟 LAYERED 同维度对照, 唯一变量是 layered 的 archive/summarizer/KeyFactStore.
      */
     public enum MemoryStrategy { LAYERED, BASELINE_WINDOW }
 
     /**
-     * BASELINE 滑窗 maxMessages 选 10: 大致匹配 LayeredChatMemory(K=3) 在典型 case 里的稳态消息数
-     * (system + user + ~3 个 cycle × 2-3 条 ≈ 8-11), 确保对照实验里 baseline 不被人为饿死.
+     * BASELINE 滑窗的"最近 K 次工具调用"上限. 跟 LayeredChatMemory.DEFAULT_KEEP_RECENT_TOOL_CALLS=3
+     * 严格一致, 让两条路径在"recent 容量"上是 1:1 对照.
+     *
+     * 历史: 这里原本用 LangChain4j 自带 MessageWindowChatMemory(maxMessages=10),
+     * parallel tool calling 下消息数不对应 cycle 数, baseline 在 dj_005/006 上实际只装 2-3 cycle,
+     * 比 layered 更早失忆 — 这是个跟"memory 设计"无关的配置劣势, 让对照实验不公平.
+     * 换成 ToolCallWindowChatMemory 后, 两侧容量按同一维度算, 唯一变量是 layered 的增强机制.
      */
-    public static final int BASELINE_WINDOW_MESSAGES = 10;
+    public static final int BASELINE_WINDOW_TOOL_CALLS = LayeredChatMemory.DEFAULT_KEEP_RECENT_TOOL_CALLS;
 
     /**
      * 单次 diagnose() 期间最多允许的连续工具调用次数. 超过即 LangChain4j 抛异常,
@@ -156,8 +162,9 @@ public class LangChain4jDiagnosisAgent implements DiagnosisAgent {
                     LayeredChatMemory.DEFAULT_KEEP_RECENT_TOOL_CALLS,
                     factStore, new FactExtractor(),
                     new LlmHistorySummarizer(model));
-            case BASELINE_WINDOW -> MessageWindowChatMemory.withMaxMessages(
-                    BASELINE_WINDOW_MESSAGES);
+            case BASELINE_WINDOW -> new ToolCallWindowChatMemory(
+                    "baseline-" + System.nanoTime(),
+                    BASELINE_WINDOW_TOOL_CALLS);
         };
     }
 

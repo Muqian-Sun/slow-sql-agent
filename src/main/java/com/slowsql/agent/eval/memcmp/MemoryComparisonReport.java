@@ -16,7 +16,7 @@ import java.util.Map;
 import java.util.function.ToLongFunction;
 
 /**
- * 同一 golden case 在 LayeredChatMemory(LAYERED) 与 MessageWindowChatMemory(BASELINE) 下
+ * 同一 golden case 在 LayeredChatMemory(LAYERED) 与 ToolCallWindowChatMemory(BASELINE) 下
  * 的 token 占用对照. 用于证伪 / 证实"分层上下文较默认滑窗降低 token"的说法.
  *
  * 配对策略:
