@@ -5,13 +5,13 @@ package com.slowsql.agent.tools;
  *
  * 这层抽象的意义:
  *   - 单测 / 评测离线模式: 用 MockToolBackend, 不依赖真实 DB.
- *   - 真实诊断: 用 JdbcToolBackend, 连本地或 shadow DB.
+ *   - 真实诊断: 用 JdbcToolBackend, 连诊断用的只读副本 DB.
  *   - 工具结果都是结构化 record, DiagnosisTools 负责序列化成 JSON 字符串发给 LLM.
  *
  * 返回 record 而非 String 的好处:
  *   - DiagnosisTools 可以从 record 字段提取 status / failure_reason 落到 stats,
  *     不需要去 parse 字符串拼起来的 "ERROR: xxx" / "FAIL: xxx".
- *   - record 保留类型, 后续接 EXPLAIN cost 对比 / shadow DB 切换都在 record 字段维度演进.
+ *   - record 保留类型, 后续接 EXPLAIN cost 对比 / 多 DataSource 切换都在 record 字段维度演进.
  */
 public interface ToolBackend {
 

@@ -11,6 +11,7 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.SQLSyntaxErrorException;
+import java.sql.SQLTimeoutException;
 import java.sql.Statement;
 import java.sql.Time;
 import java.sql.Timestamp;
@@ -60,7 +61,8 @@ import java.util.regex.Pattern;
  *     额外: 同时 EXPLAIN 原 SQL, 算 rows_reduction_pct, 让 LLM / 评测层拿到真实改进幅度.
  *     语义正确性靠 assumptions 兜底(必须显式声明 cursor 业务约定).
  *
- *   影子库假设(只读 + 无并发写), 不依赖事务快照.
+ *   row_hash 双跑用同一 Connection 包成单事务 (REPEATABLE READ), 两次 SELECT 同一 consistent
+ *   read-view, 避免并发写引起的 MVCC 漂移误判. 跑完直接 rollback (verify 路径无写入).
  */
 public class JdbcToolBackend implements ToolBackend {
 
@@ -129,6 +131,8 @@ public class JdbcToolBackend implements ToolBackend {
             return TableInfoResult.ok(tableName, createTable, indexes, estimatedRows);
         } catch (SQLSyntaxErrorException e) {
             return TableInfoResult.error("not_found", tableName);
+        } catch (SQLTimeoutException e) {
+            return TableInfoResult.error("query_timeout", tableName);
         } catch (SQLException e) {
             return TableInfoResult.error("internal_error", tableName);
         }
@@ -147,6 +151,8 @@ public class JdbcToolBackend implements ToolBackend {
             return ExplainResult.ok(runExplainAsList(conn, stripTrailingSemicolon(sql)));
         } catch (SQLSyntaxErrorException e) {
             return ExplainResult.error("syntax_error", e.getMessage());
+        } catch (SQLTimeoutException e) {
+            return ExplainResult.error("query_timeout", e.getMessage());
         } catch (SQLException e) {
             return ExplainResult.error("internal_error", e.getMessage());
         }
@@ -164,13 +170,28 @@ public class JdbcToolBackend implements ToolBackend {
 
         VerifyStrategy strategy = detectStrategy(originalSql, rewrittenSql);
         try (Connection conn = dataSource.getConnection()) {
-            return switch (strategy) {
-                case CURSOR_PLAN -> verifyCursorPlan(conn, originalSql, rewrittenSql);
-                case DEFERRED_JOIN_HASH, GENERAL_HASH ->
-                        verifyByRowHash(conn, originalSql, rewrittenSql, strategy);
-            };
+            // row_hash 双跑必须在同一 InnoDB consistent read-view 内 (REPEATABLE READ + 单事务),
+            // 否则两次 executeQuery 各拿独立快照, 期间任何并发写都会让 row_hash 误判 content_mismatch.
+            // cursor_plan_validity 路径只做 EXPLAIN, 也不写, 同样 rollback 兜底.
+            int originalIsolation = conn.getTransactionIsolation();
+            boolean originalAutoCommit = conn.getAutoCommit();
+            conn.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+            conn.setAutoCommit(false);
+            try {
+                return switch (strategy) {
+                    case CURSOR_PLAN -> verifyCursorPlan(conn, originalSql, rewrittenSql);
+                    case DEFERRED_JOIN_HASH, GENERAL_HASH ->
+                            verifyByRowHash(conn, originalSql, rewrittenSql, strategy);
+                };
+            } finally {
+                try { conn.rollback(); } catch (SQLException ignored) { /* 只读路径, rollback 失败不影响结果 */ }
+                try { conn.setAutoCommit(originalAutoCommit); } catch (SQLException ignored) {}
+                try { conn.setTransactionIsolation(originalIsolation); } catch (SQLException ignored) {}
+            }
         } catch (SQLSyntaxErrorException e) {
             return VerifyResult.error("syntax_error", e.getMessage());
+        } catch (SQLTimeoutException e) {
+            return VerifyResult.error("query_timeout", e.getMessage());
         } catch (SQLException e) {
             return VerifyResult.error("internal_error", e.getMessage());
         }
@@ -200,15 +221,27 @@ public class JdbcToolBackend implements ToolBackend {
                                         VerifyStrategy strategy) throws SQLException {
         String subtype = strategy == VerifyStrategy.DEFERRED_JOIN_HASH ? "deferred_join" : "general";
 
+        // 双跑顺手计时. nanoTime 精度足够区分 ms 级差异;
+        // 转 ms 后写入 result, ns 留作 speedup 比值计算(避免 ms 取整后除零).
+        long t0Orig = System.nanoTime();
         List<String> origHashes = runAndHashRows(conn, stripTrailingSemicolon(originalSql));
+        long origNs = System.nanoTime() - t0Orig;
+
+        long t0New = System.nanoTime();
         List<String> newHashes = runAndHashRows(conn, stripTrailingSemicolon(rewrittenSql));
+        long newNs = System.nanoTime() - t0New;
+
+        Long origMs = origNs / 1_000_000;
+        Long newMs = newNs / 1_000_000;
+        Double speedup = (newNs <= 0 || origNs <= 0) ? null : (double) origNs / newNs;
 
         if (origHashes.size() != newHashes.size()) {
             return VerifyResult.failRowHash(
                     "row_count_diff", subtype, Math.max(origHashes.size(), newHashes.size()),
                     null, null,
                     String.format("original=%d rows vs rewritten=%d rows in top %d",
-                            origHashes.size(), newHashes.size(), VERIFY_TOP_N));
+                            origHashes.size(), newHashes.size(), VERIFY_TOP_N),
+                    origMs, newMs, speedup);
         }
         int n = origHashes.size();
         int firstDiff = -1;
@@ -227,7 +260,8 @@ public class JdbcToolBackend implements ToolBackend {
             Long originalRowsEst = originalPlan == null ? null : sumPlanRows(originalPlan);
             Double reductionPct = computeReductionPct(originalRowsEst, rewrittenRowsEst);
             return VerifyResult.passRowHash(subtype, n, rewrittenPlan, originalPlan,
-                    rewrittenRowsEst, originalRowsEst, reductionPct);
+                    rewrittenRowsEst, originalRowsEst, reductionPct,
+                    origMs, newMs, speedup);
         }
         // 顺序不一致但集合可能相等 → 提示 LLM 检查 ORDER BY 稳定性
         List<String> sortedOrig = new ArrayList<>(origHashes);
@@ -236,10 +270,12 @@ public class JdbcToolBackend implements ToolBackend {
         sortedNew.sort(String::compareTo);
         if (sortedOrig.equals(sortedNew)) {
             return VerifyResult.failRowHash("order_mismatch", subtype, n, firstDiff, diffCount,
-                    String.format("rows=%d, diff_count=%d, set equal but order differs", n, diffCount));
+                    String.format("rows=%d, diff_count=%d, set equal but order differs", n, diffCount),
+                    origMs, newMs, speedup);
         }
         return VerifyResult.failRowHash("content_mismatch", subtype, n, firstDiff, diffCount,
-                String.format("rows=%d, first_diff_at_index=%d, diff_count=%d", n, firstDiff, diffCount));
+                String.format("rows=%d, first_diff_at_index=%d, diff_count=%d", n, firstDiff, diffCount),
+                origMs, newMs, speedup);
     }
 
     /**
@@ -247,6 +283,9 @@ public class JdbcToolBackend implements ToolBackend {
      *   1. 改写必须含 ORDER BY (否则游标语义不可重复)
      *   2. EXPLAIN 改写 SQL, 检查 type / key
      *   3. EXPLAIN 原 SQL, 算 rows_reduction_pct
+     *   4. 真跑一次改写 SQL 测 rewritten_latency_ms
+     *      (cursor 改写形态必然是 PK 区间扫 + LIMIT n, 永远 ms 级, 安全;
+     *       不真测原 SQL — 那是要被绕开的 deep offset 慢查询, 测它没意义且会卡 timeout)
      */
     private VerifyResult verifyCursorPlan(Connection conn, String originalSql, String rewrittenSql)
             throws SQLException {
@@ -300,10 +339,35 @@ public class JdbcToolBackend implements ToolBackend {
         List<VerifyResult.PlanRow> originalPlan = safeExplainPlan(conn, originalSql);
         Long originalRowsEst = originalPlan == null ? null : sumPlanRows(originalPlan);
         Double reductionPct = computeReductionPct(originalRowsEst, rewrittenRowsEst);
+
+        // 4) 真跑改写 SQL 一次测 latency. 失败 / 超时不阻塞 PASS, 退回 null.
+        Long rewrittenLatencyMs = safeTimeRewrittenExecution(conn, rewrittenSql);
+
         return VerifyResult.passCursorPlan(
                 rewrittenPlan, originalPlan,
                 rewrittenRowsEst, originalRowsEst, reductionPct,
-                softWarnings);
+                softWarnings,
+                rewrittenLatencyMs);
+    }
+
+    /**
+     * 真跑一次改写 SQL, 测 wall-clock 耗时. 用于 cursor 路径给 DBA 看"改写 SQL 实际跑多快".
+     * cursor 改写形态必然是 `WHERE pk > <const> ORDER BY pk LIMIT n` — PK 区间扫 + 早停, 必 ms 级.
+     * setQueryTimeout(10s) 兜底, 超时 / 异常都返回 null 让 Jackson 跳过.
+     */
+    private Long safeTimeRewrittenExecution(Connection conn, String rewrittenSql) {
+        try (Statement st = conn.createStatement()) {
+            applyLimits(st);
+            st.setMaxRows(VERIFY_TOP_N);   // 与 row_hash 路径口径对齐
+            long t0 = System.nanoTime();
+            try (ResultSet rs = st.executeQuery(stripTrailingSemicolon(rewrittenSql))) {
+                int n = 0;
+                while (rs.next() && n < VERIFY_TOP_N) n++;
+            }
+            return (System.nanoTime() - t0) / 1_000_000;
+        } catch (SQLException e) {
+            return null;
+        }
     }
 
     /** plan 中各表 rows 估算求和(null 当 0); 用于 reduction% 计算. */

@@ -3,71 +3,72 @@ package com.slowsql.agent.tools;
 import java.util.Map;
 
 /**
- * 工具失败时给 LLM 的行动建议 catalog.
+ * 工具失败时给 LLM 的"类别 + 下一步动作"目录.
  *
- * 设计目标:
- *   - 把"工具失败后 LLM 该往哪个方向自纠正"显式化, 避免 LLM 看到 raw error message 后死循环重试.
- *   - 所有 reason → hint 集中一处, 三个 Result record 的工厂方法自动 fallback 到这里.
- *   - hint 是给 LLM 看的, 措辞要短 / 指方向 / 含可操作动词, 不写细节列表.
+ * 设计:
+ *   - 把 raw reason 字符串归到 6 类 LLM-actionable 错误 (见 {@link ErrorCategory}) + 1 类 INTERNAL 兜底
+ *   - 每类一条 hint, 不为每个 reason 重复定制 (复杂度收敛)
+ *   - 结果 record 的工厂方法用 {@link #categoryOf(String)} / {@link #hintFor(String)} 自动填充
+ *
+ * reason → category 映射:
+ *   - 只覆盖真实使用中可能出现的 reason 字符串 (与 record.reason() 字段保持一致)
+ *   - 未知 reason 返回 null, 由调用方决定是否兜底为 INTERNAL
  *
  * 命名约定:
- *   reason 用 snake_case 单词组, 与 record.reason() 字段保持一致, 这样
- *   `HintCatalog.hintFor(record.reason())` 能稳定查到.
+ *   - reason: snake_case 单词组 (来自工具内部 / 异常映射)
+ *   - category: 大写下划线 (来自 ErrorCategory)
  */
 public final class HintCatalog {
 
-    private static final Map<String, String> HINTS = Map.ofEntries(
+    private static final Map<String, ErrorCategory> REASON_TO_CATEGORY = Map.ofEntries(
+            // getTableInfo
+            Map.entry("not_found", ErrorCategory.SCHEMA_NOT_FOUND),
+            Map.entry("invalid_identifier", ErrorCategory.SCHEMA_NOT_FOUND),
 
-            // ---------- getTableInfo ----------
-            Map.entry("invalid_identifier",
-                    "表名/列名只能含字母数字下划线且 ≤64 字符. 检查参数拼写, 不要传带分号或空格的串."),
-            Map.entry("not_found",
-                    "对象不存在或不在当前 schema. 检查拼写, 不要猜可能的表名 — 优先看原 SQL 引用了哪张表."),
+            // runExplain / SqlSafety / 输入参数
+            Map.entry("safety_rejected", ErrorCategory.SAFETY_REJECTED),
+            Map.entry("empty_sql", ErrorCategory.SAFETY_REJECTED),
+            Map.entry("original_sql_unsafe", ErrorCategory.SAFETY_REJECTED),
+            Map.entry("rewritten_sql_unsafe", ErrorCategory.SAFETY_REJECTED),
 
-            // ---------- runExplain / SqlSafety ----------
-            // 注: SqlSafety 的细分原因(only_select_or_with_allowed / ddl_or_dml_not_allowed /
-            //     multiple_statements_not_allowed)被塞到 result.message, reason 统一是 safety_rejected,
-            //     这里只配 safety_rejected 的 hint, 不重复.
-            Map.entry("safety_rejected",
-                    "工具只接 SELECT/WITH 单语句. 检查是否含 DML(UPDATE/DELETE/INSERT 等)或多条用分号串接的语句."),
-            Map.entry("empty_sql",
-                    "传入了空 SQL, 检查参数."),
+            // SQL 语法
+            Map.entry("syntax_error", ErrorCategory.SYNTAX_ERROR),
+            Map.entry("explain_returned_empty", ErrorCategory.SYNTAX_ERROR),
 
-            // ---------- syntax / internal ----------
-            Map.entry("syntax_error",
-                    "SQL 语法错. cursor 改写最常见: 占位符 `?` 没填具体值(改成 0 之类的示例值, 在 assumptions 里说明占位语义)" +
-                            "; 其它常见: 引号不匹配 / 列名表名拼写错."),
-            Map.entry("internal_error",
-                    "数据库内部错误, 不是改写本身的问题. 跳过这次工具调用, 用已有信息继续诊断."),
+            // verify row_hash 失败
+            Map.entry("row_count_diff", ErrorCategory.SEMANTIC_DIVERGENCE),
+            Map.entry("content_mismatch", ErrorCategory.SEMANTIC_DIVERGENCE),
 
-            // ---------- verifyResultEquivalence (fail) ----------
-            Map.entry("original_sql_unsafe",
-                    "你传的 originalSql 含非 SELECT 内容 — 这不正常, 检查是否传错了参数(应该传待诊断的原始 SQL)."),
-            Map.entry("rewritten_sql_unsafe",
-                    "你写的 rewrittenSql 含 DML 或多语句. 重写一个只读的 SELECT 改写."),
-            Map.entry("row_count_diff",
-                    "改写返回行数与原 SQL 不一致. 常见原因: WHERE 条件多/少, JOIN 类型变了(INNER vs LEFT), DISTINCT 被丢了."),
-            Map.entry("content_mismatch",
-                    "改写行内容与原 SQL 不一致. 常见原因: SELECT 列顺序/列数变了 / 改写漏了 WHERE 条件 / ORDER BY 列不一致."),
-            Map.entry("order_mismatch",
-                    "结果集相同但顺序不一致 → ORDER BY 不稳定. 在 ORDER BY 末尾追加 PK 作 tie-breaker."),
-            Map.entry("missing_order_by",
-                    "cursor 改写必须包含 ORDER BY 子句保证游标可重复. 加上 ORDER BY <游标列>."),
-            Map.entry("cursor_plan_invalid",
-                    "改写 plan 不健康(全表扫或未走索引). 修法: 让 WHERE 列命中索引 / 改用 PK 做游标谓词 / 不要在游标列上加函数."),
-            Map.entry("explain_returned_empty",
-                    "改写 SQL 的 EXPLAIN 输出为空, 通常是 SQL 本身不合法. 检查语法."),
+            // verify cursor_plan 失败 (排序)
+            Map.entry("order_mismatch", ErrorCategory.UNSTABLE_ORDER),
+            Map.entry("missing_order_by", ErrorCategory.UNSTABLE_ORDER),
 
-            // ---------- JSON 序列化兜底 ----------
-            Map.entry("json_serialize_fail",
-                    "工具结果序列化失败, 不是你的问题. 用已有信息继续诊断.")
+            // verify cursor_plan 失败 (计划)
+            Map.entry("cursor_plan_invalid", ErrorCategory.PLAN_UNHEALTHY),
+
+            // 查询超时 — JDBC 设的 queryTimeout 触发, 与 internal 区分让 LLM 拿到正确指引
+            Map.entry("query_timeout", ErrorCategory.QUERY_TIMEOUT),
+
+            // 系统兜底
+            Map.entry("internal_error", ErrorCategory.INTERNAL),
+            Map.entry("json_serialize_fail", ErrorCategory.INTERNAL)
     );
 
     private HintCatalog() {}
 
-    /** 查 hint, 没匹配返回 null(record 的 hint 字段就保持 null). */
-    public static String hintFor(String reason) {
+    /**
+     * reason → 类别. 未知 reason 返回 null (保留"未分类"状态, 调用方按需处理).
+     */
+    public static ErrorCategory categoryOf(String reason) {
         if (reason == null) return null;
-        return HINTS.get(reason);
+        return REASON_TO_CATEGORY.get(reason);
+    }
+
+    /**
+     * reason → 类别 hint. 未知 reason 返回 null, 与历史合约保持一致.
+     */
+    public static String hintFor(String reason) {
+        ErrorCategory cat = categoryOf(reason);
+        return cat == null ? null : cat.hint();
     }
 }

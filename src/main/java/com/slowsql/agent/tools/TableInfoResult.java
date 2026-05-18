@@ -10,13 +10,16 @@ import java.util.List;
  *    estimated_rows, row_count_note}
  *
  * 失败:
- *   {status:"error", reason, hint, table}
+ *   {status:"error", reason, category, hint, table}
  *
- * hint 由 HintCatalog 按 reason 自动填, 给 LLM 行动建议.
+ * category 与 hint 由 HintCatalog 按 reason 自动填:
+ *   - category ∈ ErrorCategory 6 类 + INTERNAL 兜底
+ *   - hint     给 LLM 行动建议
  */
 public record TableInfoResult(
         String status,
         String reason,
+        String category,
         String hint,
         String table,
         String createTable,
@@ -33,12 +36,15 @@ public record TableInfoResult(
 
     public static TableInfoResult ok(String table, String createTable,
                                      List<IndexEntry> indexes, long estimatedRows) {
-        return new TableInfoResult("ok", null, null, table, createTable, indexes, estimatedRows,
+        return new TableInfoResult("ok", null, null, null, table, createTable, indexes, estimatedRows,
                 "InnoDB approx, may deviate ±30% without ANALYZE");
     }
 
     public static TableInfoResult error(String reason, String table) {
-        return new TableInfoResult("error", reason, HintCatalog.hintFor(reason),
+        ErrorCategory cat = HintCatalog.categoryOf(reason);
+        return new TableInfoResult("error", reason,
+                cat == null ? null : cat.name(),
+                cat == null ? null : cat.hint(),
                 table, null, null, null, null);
     }
 
