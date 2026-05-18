@@ -16,6 +16,10 @@ import java.sql.Date;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
+
+import java.util.HashSet;
+import java.util.Set;
+import java.util.regex.Matcher;
 import java.sql.SQLException;
 import java.sql.SQLSyntaxErrorException;
 import java.sql.SQLTimeoutException;
@@ -96,6 +100,16 @@ public class JdbcToolBackend implements ToolBackend {
     private static final Pattern ORDER_BY_PATTERN = Pattern.compile(
             "\\bORDER\\s+BY\\b",
             Pattern.CASE_INSENSITIVE);
+
+    /** 从 SQL 抓主表名 (FROM 后第一个标识符), 用于查 indexes 判 ORDER BY 唯一性. */
+    private static final Pattern FROM_TABLE_PATTERN = Pattern.compile(
+            "\\bFROM\\s+`?([A-Za-z_][A-Za-z0-9_]*)`?",
+            Pattern.CASE_INSENSITIVE);
+
+    /** 抓 ORDER BY 子句到 LIMIT/GROUP/末尾之间的列列表. */
+    private static final Pattern ORDER_BY_CLAUSE_PATTERN = Pattern.compile(
+            "\\bORDER\\s+BY\\s+(.+?)(?=\\s+LIMIT\\b|\\s+GROUP\\b|\\s+FOR\\s+UPDATE\\b|;|$)",
+            Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
     /**
      * cursor plan 校验时 rows 估算 soft warn 阈值. 注: MySQL 的 EXPLAIN.rows 报的是
@@ -276,6 +290,24 @@ public class JdbcToolBackend implements ToolBackend {
         sortedOrig.sort(String::compareTo);
         sortedNew.sort(String::compareTo);
         if (sortedOrig.equals(sortedNew)) {
+            // 集合一致, 序列不一致. 看原 SQL ORDER BY 是否非唯一:
+            //   - 非唯一 (主表上没有索引完全覆盖 ORDER BY 列) → "组内顺序"是 MySQL 未指定行为,
+            //     改写加 tie-breaker 反而是修复, 走 pass + set_eq 路径 + warnings 说明
+            //   - 唯一但顺序仍漂移 → 真 bug, 报 order_mismatch
+            if (originalOrderByIsNonUnique(conn, originalSql)) {
+                List<VerifyResult.PlanRow> rewrittenPlan = safeExplainPlan(conn, rewrittenSql);
+                List<VerifyResult.PlanRow> originalPlan = safeExplainPlan(conn, originalSql);
+                long rewrittenRowsEst = sumPlanRows(rewrittenPlan);
+                Long originalRowsEst = originalPlan == null ? null : sumPlanRows(originalPlan);
+                Double reductionPct = computeReductionPct(originalRowsEst, rewrittenRowsEst);
+                List<String> warnings = List.of(
+                        "原 SQL ORDER BY 列在主表上无唯一索引覆盖, 组内顺序由 MySQL 内部排序决定 (未指定行为)",
+                        "改写引入 tie-breaker 让顺序确定化, 集合一致但序列不同, 按集合等价判定 pass",
+                        "若业务对组内具体顺序敏感, 应先稳定化原 SQL 排序键再做深分页改写");
+                return VerifyResult.passRowHashSetEquivalent(subtype, n, rewrittenPlan, originalPlan,
+                        rewrittenRowsEst, originalRowsEst, reductionPct,
+                        origMs, newMs, speedup, warnings);
+            }
             return VerifyResult.failRowHash("order_mismatch", subtype, n, firstDiff, diffCount,
                     String.format("rows=%d, diff_count=%d, set equal but order differs", n, diffCount),
                     origMs, newMs, speedup);
@@ -283,6 +315,65 @@ public class JdbcToolBackend implements ToolBackend {
         return VerifyResult.failRowHash("content_mismatch", subtype, n, firstDiff, diffCount,
                 String.format("rows=%d, first_diff_at_index=%d, diff_count=%d", n, firstDiff, diffCount),
                 origMs, newMs, speedup);
+    }
+
+    /**
+     * 判断 SQL 的 ORDER BY 列在主表 schema 上是否非唯一 — 即"没有任何唯一索引(PK/UNIQUE)
+     * 的列集合完全被 ORDER BY 列覆盖". 非唯一时, MySQL 对同值组内的行排序未指定.
+     *
+     * 实现简化:
+     *   - 只看主表 (SQL 第一个 FROM 后的表名). JOIN 副表的列不纳入判断, 保守一些
+     *   - ORDER BY 列做 alias / 反引号 / ASC|DESC 标准化
+     *   - 解析失败 / 拿不到 schema → 返回 false (保守视为唯一, 维持严格判定)
+     */
+    private boolean originalOrderByIsNonUnique(Connection conn, String sql) {
+        try {
+            String mainTable = extractMainTable(sql);
+            if (mainTable == null) return false;
+            Set<String> orderByCols = extractOrderByColumns(sql);
+            if (orderByCols.isEmpty()) return false;
+
+            List<TableInfoResult.IndexEntry> indexes = indexEntries(conn, mainTable);
+            for (TableInfoResult.IndexEntry idx : indexes) {
+                if (!idx.unique()) continue;
+                List<String> idxCols = idx.columns();
+                if (idxCols == null || idxCols.isEmpty()) continue;
+                boolean allInOrderBy = idxCols.stream()
+                        .map(String::toLowerCase)
+                        .allMatch(orderByCols::contains);
+                if (allInOrderBy) return false;     // 找到唯一索引完全在 ORDER BY 里
+            }
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static String extractMainTable(String sql) {
+        if (sql == null) return null;
+        Matcher m = FROM_TABLE_PATTERN.matcher(sql);
+        return m.find() ? m.group(1) : null;
+    }
+
+    /** 解析 ORDER BY 子句, 返回标准化(小写, 去 alias 前缀, 去 ASC/DESC)的列名集合. */
+    private static Set<String> extractOrderByColumns(String sql) {
+        if (sql == null) return Set.of();
+        Matcher m = ORDER_BY_CLAUSE_PATTERN.matcher(sql);
+        if (!m.find()) return Set.of();
+        String clause = m.group(1);
+        Set<String> cols = new HashSet<>();
+        for (String token : clause.split(",")) {
+            String s = token.trim();
+            // 含函数 / 表达式 (e.g. DATE(create_time)) — 不当成列, 跳过
+            // 这样 "ORDER BY DATE(create_time)" 视为没列覆盖唯一索引 → 判非唯一, 保守正确
+            if (s.contains("(") || s.isEmpty()) continue;
+            s = s.replaceAll("(?i)\\s+(ASC|DESC)\\s*$", "");
+            int dot = s.lastIndexOf('.');
+            if (dot >= 0) s = s.substring(dot + 1);
+            s = s.replace("`", "").trim();
+            if (!s.isEmpty()) cols.add(s.toLowerCase());
+        }
+        return cols;
     }
 
     /**

@@ -111,6 +111,30 @@ public record VerifyResult(
     }
 
     /**
+     * 集合等价路径: 原 SQL ORDER BY 列在 schema 上非唯一 (没有覆盖 ORDER BY 的唯一索引),
+     * 改写引入 tie-breaker 让顺序确定化. row_hash 序列不一致但集合一致, 仍返回 pass —
+     * "组内顺序"差异本就是 MySQL 对非唯一排序未指定的行为, 改写实质上修了原 SQL 的隐性 bug.
+     *
+     * row_hash_subtype 加 "_set_eq" 后缀让调用方能识别; warnings 显式声明语义假设.
+     */
+    public static VerifyResult passRowHashSetEquivalent(String subtype, int sampledRows,
+                                                        List<PlanRow> rewrittenPlan,
+                                                        List<PlanRow> originalPlan,
+                                                        long rewrittenRowsEstimate,
+                                                        Long originalRowsEstimate,
+                                                        Double rowsReductionPct,
+                                                        Long originalLatencyMs,
+                                                        Long rewrittenLatencyMs,
+                                                        Double speedupX,
+                                                        List<String> warnings) {
+        return new VerifyResult("pass", "row_hash", null, null, null, null, subtype + "_set_eq",
+                sampledRows, null, null, rewrittenPlan, originalPlan,
+                rewrittenRowsEstimate, originalRowsEstimate, rowsReductionPct,
+                warnings == null ? List.of() : warnings,
+                originalLatencyMs, rewrittenLatencyMs, speedupX);
+    }
+
+    /**
      * message: 描述本次失败的具体细节(eg "original=N vs rewritten=M");
      * hint:    永远从 HintCatalog 取, 给 LLM 修复方向. 调用方不再传 hint, 避免把
      *          描述误塞进 hint 覆盖 catalog 的可操作建议.
