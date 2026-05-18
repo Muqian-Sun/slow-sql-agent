@@ -76,7 +76,11 @@ public class ReportGenerator {
         sb.append("<h2>🎯 第 2 层 效果(改写质量)</h2>");
         appendMetricsTable(sb, new String[][]{
                 {"outcome_match_rate (整体)", pct(r.outcomeMatchRate()), "> 85%"},
-                {"rewrite_precision (期望改写的 case)", pct(r.rewritePrecision()), "> 85%"},
+                {"rewrite_precision (loose, 含 acceptable 兜底)", pct(r.rewritePrecision()), "> 85%"},
+                {"rewrite_precision_strict (严格命中 expected)", pct(r.rewritePrecisionStrict()), "—"},
+                {"&nbsp;&nbsp;delta (loose - strict)",
+                        pct(r.rewritePrecision() - r.rewritePrecisionStrict()),
+                        "越大说明 LLM 越倾向'保守标 unsupported 蒙对'"},
                 {"unsupported_recall (期望 unsupported 的 case)", pct(r.unsupportedRecall()), "> 85%"},
                 {"verification_pass_rate", pct(r.verificationPassRate()), "> 85%"},
                 {"verification_undetermined_rate", pct(r.verificationUndeterminedRate()), "—"},

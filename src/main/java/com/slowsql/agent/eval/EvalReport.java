@@ -26,7 +26,11 @@ public record EvalReport(
 
         // ─── 第 2 层:效果 ───
         double outcomeMatchRate,
-        double rewritePrecision,          // 仅 rewrite 期望的 case 上的命中率, 不被 unsupported 占比稀释
+        double rewritePrecision,          // 仅 rewrite 期望的 case 上的命中率, 含 acceptable_outcomes 兜底
+                                          // (例如 dj_006 期望 deferred_join, acceptable 含 unsupported,
+                                          //  LLM 标 unsupported 也算 match — 宽松判定)
+        double rewritePrecisionStrict,    // 同上但 strict: 只看 outcome == expected_outcome, acceptable 不参与
+                                          // 与 rewritePrecision 的 delta 暴露"保守标 unsupported 蒙对"的样本占比
         double unsupportedRecall,         // 仅 unsupported 期望的 case 上的召回率, 看越界识别能力
         double verificationPassRate,
         double verificationUndeterminedRate,
@@ -88,6 +92,12 @@ public record EvalReport(
         double rewritePrec = ratioWhere(all,
                 r -> r.expectedOutcome() != null && !"unsupported".equals(r.expectedOutcome()),
                 RunResult::outcomeMatched);
+        // strict: 只看 outcome == expected_outcome, 不让 acceptable_outcomes 兜底.
+        // delta = rewritePrec - rewritePrecStrict 就是"保守标 unsupported 蒙对"的样本占比.
+        double rewritePrecStrict = ratioWhere(all,
+                r -> r.expectedOutcome() != null && !"unsupported".equals(r.expectedOutcome()),
+                r -> r.diagnosis() != null
+                        && r.expectedOutcome().equals(r.diagnosis().outcome().toJsonValue()));
         double unsupRecall = ratioWhere(all,
                 r -> "unsupported".equals(r.expectedOutcome()),
                 RunResult::outcomeMatched);
@@ -138,7 +148,7 @@ public record EvalReport(
                 config.promptVersion(), Instant.now(),
                 resultsPerCase.size(), totalRuns,
                 p95, highConf, 0.0,
-                outcomeMatch, rewritePrec, unsupRecall,
+                outcomeMatch, rewritePrec, rewritePrecStrict, unsupRecall,
                 verifyPass, verifyUndet, costMed,
                 speedupMed, speedupMax,
                 businessRate, assumptionsRate,
@@ -166,7 +176,7 @@ public record EvalReport(
     private static EvalReport empty(EvalConfig config) {
         return new EvalReport(config.promptVersion(), Instant.now(),
                 0, 0, 0, 0, 0,
-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 0, 0, 0, 0, Map.of(),
                 List.of(), List.of());
     }
