@@ -437,6 +437,66 @@
     },
 
     {
+      "id": "case_dp_dj_010",
+      "complexity": "complex",
+      "tags": ["deep_pagination", "ecommerce_listing", "non_unique_order_by", "composite_filter"],
+      "input": {
+        "sql": "SELECT p.id, p.name, p.price, p.create_time, m.name AS merchant_name, m.region, c.name AS category_name FROM products p JOIN merchants m ON p.merchant_id = m.id JOIN categories c ON p.category_id = c.id WHERE p.category_id = 5 AND p.price BETWEEN 100 AND 1000 AND p.status = 1 ORDER BY p.create_time DESC LIMIT 80000, 20",
+        "schema_required": ["products", "merchants", "categories"],
+        "data_volume_hint": "电商平台运营后台的商品筛选页: 类目+价格区间+在售状态, 按上架时间倒序翻页. products 100 万行, idx_category 能命中类目过滤但 price/status 无索引导致 OFFSET 阶段大量回表过滤; create_time 非唯一",
+        "requirement": "平台运营后台商品筛选页, 按类目和价格区间查看商品列表, 翻页 URL 模式不可改"
+      },
+      "expected": {
+        "expected_outcome": "rewritten_deferred_join",
+        "acceptable_outcomes": ["rewritten_deferred_join", "unsupported"],
+        "min_cost_reduction_percent": 60,
+        "must_pass_verification": true,
+        "notes_for_evaluator": "期望路径: 3 张表 getTableInfo → runExplain 看到 OFFSET 阶段大量过滤行 → deferred_join 改写 (子查询 SELECT id FROM products WHERE category_id=5 AND price BETWEEN ... AND status=1 ORDER BY create_time DESC, id DESC LIMIT 80000, 20 走 idx_category 拿 PK; 外层 3 表 JOIN 反查 20 行) → verify 走 set-equivalent (ORDER BY create_time 非唯一). 缺 status/price 复合索引也可降级标 unsupported, additional_suggestions 给 idx_category_status_price DDL 建议."
+      },
+      "notes": "电商商品列表深翻页 — 3 表 JOIN + 复合过滤 + 大 OFFSET, 是电商平台后台运营页常见痛点"
+    },
+
+    {
+      "id": "case_dp_dj_011",
+      "complexity": "complex",
+      "tags": ["deep_pagination", "merchant_reviews", "text_column_overhead", "filter_via_join"],
+      "input": {
+        "sql": "SELECT r.id, r.rating, r.content, r.create_time, u.name AS reviewer_name, p.name AS product_name FROM reviews r JOIN users u ON r.user_id = u.id JOIN products p ON r.product_id = p.id WHERE p.merchant_id = 100 AND r.create_time >= '2024-09-01' ORDER BY r.create_time DESC LIMIT 50000, 20",
+        "schema_required": ["reviews", "users", "products"],
+        "data_volume_hint": "商家后台看自己店铺所有商品的用户评论分页. reviews 300 万行, content TEXT 字段返回时 token 巨大. 过滤条件通过 JOIN 副表 p.merchant_id, 主表 reviews 上无对应索引; idx_product_create 复合索引以 product_id 起头, 在'按商家过滤'场景下用不上, 排序键 create_time 也无独立索引(必走 filesort)",
+        "requirement": "商家后台查看店铺评论分页, 翻页 URL 模式不可改"
+      },
+      "expected": {
+        "expected_outcome": "unsupported",
+        "acceptable_outcomes": ["unsupported", "rewritten_deferred_join"],
+        "min_cost_reduction_percent": 0,
+        "must_pass_verification": false,
+        "notes_for_evaluator": "本 case 关键在 Agent 识别'过滤条件在 JOIN 副表 + 主表无对应索引 + 排序键无索引'三重痛点. 期望路径: 3 张表 getTableInfo → runExplain 看到主表 reviews 走全表扫 + filesort → 标 outcome=unsupported, additional_suggestions 给 (a) 在 reviews 加冗余 merchant_id 列 + 复合索引 idx_merchant_create (merchant_id, create_time), 或 (b) 物化视图按 merchant 分桶. 即使 LLM 写出 deferred_join 也接受, 但优先标 unsupported."
+      },
+      "notes": "评论分页 — 过滤通过 JOIN 副表 + 主表无对应索引, 排序键也无索引, 改写空间小, 应识别为'加索引才是根因修复'的 unsupported 场景"
+    },
+
+    {
+      "id": "case_dp_dj_012",
+      "complexity": "complex",
+      "tags": ["deep_pagination", "user_actions_log", "missing_index_on_filter", "huge_table"],
+      "input": {
+        "sql": "SELECT a.id, a.user_id, a.action_type, a.target_id, a.target_type, a.create_time, u.name AS user_name FROM user_actions a JOIN users u ON a.user_id = u.id WHERE a.action_type = 'click' AND a.create_time BETWEEN '2024-11-01' AND '2024-11-30' ORDER BY a.create_time DESC LIMIT 100000, 50",
+        "schema_required": ["user_actions", "users"],
+        "data_volume_hint": "风控团队查特定行为类型用户最近行为日志分页. user_actions 1500 万行, 极深 OFFSET 100000. action_type 列上无索引(故意设计), idx_user_time 是 (user_id, create_time) 复合在 WHERE 无 user_id 过滤的场景下完全用不上; ORDER BY create_time 非唯一",
+        "requirement": "风控后台查特定行为类型用户行为分页, 接口由前端 URL 翻页跳转不可改"
+      },
+      "expected": {
+        "expected_outcome": "unsupported",
+        "acceptable_outcomes": ["unsupported"],
+        "min_cost_reduction_percent": 0,
+        "must_pass_verification": false,
+        "notes_for_evaluator": "标准缺索引场景. 期望路径: getTableInfo × 2 → runExplain 看到 user_actions 走全表扫 (action_type 无索引) → 标 outcome=unsupported, additional_suggestions 给 CREATE INDEX idx_action_time (action_type, create_time) 建议性 DDL. 即使 deferred_join 改写也无意义 (子查询同样无索引可走), agent 必须识别这是 SQL 层改写无法解决的问题."
+      },
+      "notes": "缺索引的真实场景 — 风控/数据团队查行为日志, action_type 上无索引, 是'SQL 改写救不了 SQL'的标杆 case, 期望 Agent 标 unsupported 并给 DDL 建议"
+    },
+
+    {
       "id": "case_dp_cur_005",
       "complexity": "medium",
       "tags": ["deep_pagination", "cursor_pagination", "nullable_cursor_column"],
