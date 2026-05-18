@@ -417,6 +417,26 @@
     },
 
     {
+      "id": "case_dp_dj_009",
+      "complexity": "complex",
+      "tags": ["deep_pagination", "merchant_monthly_settlement", "non_unique_order_by", "orm_style_join"],
+      "input": {
+        "sql": "SELECT o.id, o.create_time, o.amount, o.status, u.name AS user_name, p.name AS product_name, oi.quantity, oi.price FROM orders o JOIN users u ON o.user_id = u.id JOIN order_items oi ON o.id = oi.order_id JOIN products p ON oi.product_id = p.id WHERE o.merchant_id = 100 AND o.status = 1 AND o.create_time >= '2024-11-01' ORDER BY o.create_time DESC LIMIT 60000, 50",
+        "schema_required": ["orders", "users", "order_items", "products"],
+        "data_volume_hint": "商家月度对账明细页, 4 表关联是 ORM (Hibernate/MyBatis) 自动展开的常见形态. orders 200M / order_items 2000万 / 单商家月级订单约几万到十几万行. 大 OFFSET 来自'翻到第 1200 页之后'的对账复核场景",
+        "requirement": "商家后台月度对账明细分页, 财务团队按时间倒序逐页核对, 翻页 URL 模式不可改 API"
+      },
+      "expected": {
+        "expected_outcome": "rewritten_deferred_join",
+        "acceptable_outcomes": ["rewritten_deferred_join", "unsupported"],
+        "min_cost_reduction_percent": 70,
+        "must_pass_verification": true,
+        "notes_for_evaluator": "生产真实场景: 商家月度对账明细, 4 表 ORM-style JOIN. 期望路径: getTableInfo × 4 → runExplain → deferred_join 改写 (子查询只取 orders.id 走 idx_merchant_id 或 idx_status_create 过滤, 子查询 ORDER BY o.create_time DESC, o.id DESC 加 PK tie-breaker, 外层 4 表 JOIN 反查) → verifyResultEquivalence (走 set-equivalent 因为 ORDER BY o.create_time 非唯一)."
+      },
+      "notes": "真实生产场景的长难 SQL — 商家月度对账明细, 4 表 ORM-style JOIN + 非唯一排序 + 深 offset"
+    },
+
+    {
       "id": "case_dp_cur_005",
       "complexity": "medium",
       "tags": ["deep_pagination", "cursor_pagination", "nullable_cursor_column"],

@@ -39,7 +39,8 @@ class ComplexCaseSummarizerProbeIT {
     private static final List<String> COMPLEX_CASE_IDS = List.of(
             "case_dp_dj_005",   // 6 表 JOIN
             "case_dp_dj_006",   // 5 表 JOIN + 非唯一 ORDER BY
-            "case_dp_dj_008"    // complex
+            "case_dp_dj_008",   // complex
+            "case_dp_dj_009"    // 7 表 JOIN + 长难 SQL — 设计触发 summarizer 压缩路径
     );
 
     private DataSource dataSource;
