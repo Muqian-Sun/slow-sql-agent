@@ -50,10 +50,44 @@ class MemoryComparisonReportTest {
     }
 
     @Test
-    void skipsCaseWhenEitherSideErrors() {
+    void erroredCaseStillCountsTowardsReductionWhenTokensPresent() {
+        // 新语义: 失败 case 已有 errorWithStats 累计的真实 token, 也进 reduction% 加权.
+        // 体现"上下文增长到失败为止"的真实开销, 不被静默剔除.
         List<RunResult> layered = List.of(
                 runOk("case_A", 0, 100, 3),
-                runErr("case_B", 0, "llm timeout"));
+                runErrWithTokens("case_B", 0, "Tool call limit exceeded", 500));
+        List<RunResult> baseline = List.of(
+                runOk("case_A", 0, 200, 3),
+                runOk("case_B", 0, 250, 3));
+
+        MemoryComparisonReport report = MemoryComparisonReport.from("v1", layered, baseline);
+
+        // case_B 进 perCase, 但 failedSide 标 "layered"
+        assertThat(report.casesCompared()).isEqualTo(2);
+        var b = report.perCase().stream()
+                .filter(c -> c.caseId().equals("case_B")).findFirst().orElseThrow();
+        assertThat(b.failedSide()).isEqualTo("layered");
+        assertThat(b.avgLayeredTokens()).isEqualTo(500.0);
+        assertThat(b.avgBaselineTokens()).isEqualTo(250.0);
+        // reduction = 1 - 500/250 = -1.0  (layered 失败前烧了 2× baseline 的 token)
+        assertThat(b.reductionPct()).isCloseTo(-1.0, within(1e-9));
+
+        // 仍出现在 skippedDetails 里给读者诊断
+        assertThat(report.skippedDetails()).hasSize(1);
+        assertThat(report.skippedDetails().get(0).caseId()).isEqualTo("case_B");
+        assertThat(report.skippedDetails().get(0).failedSide()).isEqualTo("layered");
+
+        // overall reduction 包括 case_B 的 token: sumL = 100+500=600, sumB = 200+250=450
+        // overall = 1 - 600/450 = -0.333
+        assertThat(report.overallReductionPct()).isCloseTo(1.0 - 600.0 / 450.0, within(1e-9));
+    }
+
+    @Test
+    void erroredCaseWithZeroTokensStillSkipped() {
+        // 老 RunResult.error() 工厂 totalTokens=0 — 这种 case 还是 skip (无 token 数据可对比)
+        List<RunResult> layered = List.of(
+                runOk("case_A", 0, 100, 3),
+                runErr("case_B", 0, "llm timeout"));   // totalTokens=0
         List<RunResult> baseline = List.of(
                 runOk("case_A", 0, 200, 3),
                 runOk("case_B", 0, 250, 3));
@@ -61,8 +95,9 @@ class MemoryComparisonReportTest {
         MemoryComparisonReport report = MemoryComparisonReport.from("v1", layered, baseline);
 
         assertThat(report.casesCompared()).isEqualTo(1);
-        assertThat(report.casesSkipped()).isEqualTo(1);
-        assertThat(report.skippedCases()).containsExactly("case_B");
+        // case_B 的 token=0 → skip 仍然合理, 进 skippedDetails 但不进 perCase
+        assertThat(report.skippedCases()).contains("case_B");
+        assertThat(report.perCase()).noneMatch(c -> c.caseId().equals("case_B"));
     }
 
     @Test
@@ -218,6 +253,14 @@ class MemoryComparisonReportTest {
 
     private static RunResult runErr(String caseId, int iter, String err) {
         return RunResult.error(caseId, iter, "rewritten_deferred_join", 0, err);
+    }
+
+    /** 失败但带累计 token (模拟 errorWithStats 真实路径: LLM 撞墙前已经烧了 tokens). */
+    private static RunResult runErrWithTokens(String caseId, int iter, String err, long tokens) {
+        com.slowsql.agent.eval.AgentStatsListener stats = new com.slowsql.agent.eval.AgentStatsListener();
+        stats.onLlmResponse(tokens);   // 一次性塞 tokens 到 stats
+        return RunResult.errorWithStats(
+                caseId, iter, "rewritten_deferred_join", 1000L, err, stats, 0);
     }
 
     private static org.assertj.core.data.Offset<Double> within(double v) {

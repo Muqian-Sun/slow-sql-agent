@@ -22,8 +22,10 @@ import java.util.function.ToLongFunction;
  * 配对策略:
  *   - 按 caseId 聚合, 每个 case 取 iter=0..N 的 totalTokens 均值, 同时记录样本 stdDev,
  *     让读者能判断 reduction 数字是真信号还是 N 小时的采样噪声.
- *   - 任一侧错误 (RunResult.error != null) 整个 case 标 skipped, **但保留 SkipDetail**
- *     (失败侧 / 分类原因), 避免难 case 在加权降幅里被静默剔除而结论偏乐观.
+ *   - **失败 case 也进对照**: RunResult.errorWithStats 保留了"撞墙前累计 token",
+ *     反映"上下文增长到失败为止"的真实开销, 计入 reduction% 加权. 同时记 SkipDetail
+ *     (失败侧 / 分类原因) 让读者知道哪个 case 是失败状态参与对比.
+ *   - 唯一必须 skip 的: baseline 根本没跑这个 case (no_baseline_run), 没数据可对比.
  *   - reductionPct = 1 - layeredTokens / baselineTokens; 正值表示 layered 更省 token.
  */
 public record MemoryComparisonReport(
@@ -50,7 +52,10 @@ public record MemoryComparisonReport(
             double avgLayeredRounds,
             double avgBaselineRounds,
             double avgSummarizerInvocations,    // 仅 layered 路径有意义
-            double reductionPct
+            double reductionPct,
+            String failedSide                   // null=两边都成功; "layered"/"baseline"/"both"=部分失败仍计入对照
+                                                // 失败 case 的 token 是 errorWithStats 保留的"撞墙前累计",
+                                                // 反映"上下文增长到失败为止"的真实开销, 该进加权数字.
     ) {}
 
     /**
@@ -124,25 +129,35 @@ public record MemoryComparisonReport(
             List<RunResult> lRuns = e.getValue();
             List<RunResult> bRuns = baselineByCase.get(caseId);
 
+            // 唯一必须 skip 的情况: baseline 根本没跑这个 case, 没数据可对比
             if (bRuns == null) {
                 skipped.add(new SkipDetail(caseId, "no_baseline_run", "baseline_did_not_run"));
                 continue;
             }
+
+            // 失败 case 也进对照: RunResult.errorWithStats 保留了"撞墙前累计 token",
+            // 反映"上下文增长到失败为止"的真实开销 — 该进 reduction% 加权数字而不是被静默剔除.
             boolean lErr = hasAnyError(lRuns);
             boolean bErr = hasAnyError(bRuns);
+            String failedSide = null;
             if (lErr || bErr) {
-                String side = lErr && bErr ? "both" : (lErr ? "layered" : "baseline");
+                failedSide = lErr && bErr ? "both" : (lErr ? "layered" : "baseline");
                 String reason = lErr && bErr
                         ? "L=" + classifyError(firstError(lRuns)) + "; B=" + classifyError(firstError(bRuns))
                         : classifyError(firstError(lErr ? lRuns : bRuns));
-                skipped.add(new SkipDetail(caseId, side, reason));
-                continue;
+                skipped.add(new SkipDetail(caseId, failedSide, reason));
+                // 不 continue — 继续算 token 对比
             }
 
             double avgL = avgTokens(lRuns);
             double avgB = avgTokens(bRuns);
-            if (avgB <= 0) {
-                skipped.add(new SkipDetail(caseId, "baseline", "baseline_tokens_zero"));
+            // 真零 token (config error / 测试桩) 才 skip — 没法做除法
+            if (avgB <= 0 || avgL <= 0) {
+                if (failedSide == null) {
+                    // 没有 errored, 但 token 是 0 — 异常情况, 单独标
+                    skipped.add(new SkipDetail(caseId,
+                            avgB <= 0 ? "baseline" : "layered", "tokens_zero"));
+                }
                 continue;
             }
 
@@ -159,7 +174,8 @@ public record MemoryComparisonReport(
                     avg(lRuns, RunResult::reactRounds),
                     avg(bRuns, RunResult::reactRounds),
                     avg(lRuns, RunResult::summarizerInvocations),
-                    reduction));
+                    reduction,
+                    failedSide));
         }
 
         double overall = sumBaseline == 0 ? 0 : 1.0 - sumLayered / sumBaseline;
@@ -215,18 +231,20 @@ public record MemoryComparisonReport(
                 "case_id", "layered_tok±σ", "baseline_tok±σ", "rounds_L", "rounds_B", "reduction"));
         sb.append("------------------------------------------------------------------\n");
         for (CaseComparison c : perCase) {
-            sb.append(String.format("%-22s %7.0f±%5.0f %7.0f±%5.0f %10.1f %10.1f %9.1f%%%n",
+            String marker = c.failedSide() == null ? "" : " [" + c.failedSide() + "_failed]";
+            sb.append(String.format("%-22s %7.0f±%5.0f %7.0f±%5.0f %10.1f %10.1f %9.1f%%%s%n",
                     c.caseId(),
                     c.avgLayeredTokens(), c.layeredTokenStdDev(),
                     c.avgBaselineTokens(), c.baselineTokenStdDev(),
                     c.avgLayeredRounds(),
                     c.avgBaselineRounds(),
-                    c.reductionPct() * 100));
+                    c.reductionPct() * 100,
+                    marker));
         }
         sb.append("------------------------------------------------------------------\n");
         sb.append(String.format("avg per case        layered=%.0f  baseline=%.0f%n",
                 avgLayeredTokensPerCase, avgBaselineTokensPerCase));
-        sb.append(String.format("overall reduction   %.1f%% (weighted, both-succeeded only)  /  median %.1f%%%n",
+        sb.append(String.format("overall reduction   %.1f%% (weighted, includes errored cases)  /  median %.1f%%%n",
                 overallReductionPct * 100, medianReductionPct * 100));
 
         // OutcomeMatrix: 把"哪边救场"从隐含信号变显式数字, 跟 reduction% 并列输出
