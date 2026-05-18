@@ -1,10 +1,10 @@
 package com.slowsql.agent.config;
 
 import com.slowsql.agent.llm.LlmConfig;
-import com.slowsql.agent.tools.DataSourceFactory;
-import com.slowsql.agent.tools.JdbcConfig;
-import com.slowsql.agent.tools.JdbcToolBackend;
-import com.slowsql.agent.tools.ToolBackend;
+import com.slowsql.agent.dbinspect.DataSourceFactory;
+import com.slowsql.agent.dbinspect.JdbcConfig;
+import com.slowsql.agent.dbinspect.JdbcToolBackend;
+import com.slowsql.agent.dbinspect.ToolBackend;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;

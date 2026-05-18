@@ -1,10 +1,10 @@
 package com.slowsql.agent.eval;
 
-import com.slowsql.agent.agent.BusinessContext;
-import com.slowsql.agent.agent.DiagnosisAgent;
-import com.slowsql.agent.agent.DiagnosisResult;
-import com.slowsql.agent.agent.LangChain4jDiagnosisAgent;
-import com.slowsql.agent.agent.OutcomeType;
+import com.slowsql.agent.diagnosis.api.BusinessContext;
+import com.slowsql.agent.diagnosis.api.DiagnosisAgent;
+import com.slowsql.agent.diagnosis.api.DiagnosisResult;
+import com.slowsql.agent.diagnosis.agent.LangChain4jDiagnosisAgent;
+import com.slowsql.agent.diagnosis.api.OutcomeType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 

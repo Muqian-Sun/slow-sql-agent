@@ -1,10 +1,10 @@
 package com.slowsql.agent.web;
 
-import com.slowsql.agent.agent.BusinessContext;
-import com.slowsql.agent.agent.DiagnosisResult;
-import com.slowsql.agent.agent.LangChain4jDiagnosisAgent;
+import com.slowsql.agent.diagnosis.api.BusinessContext;
+import com.slowsql.agent.diagnosis.api.DiagnosisResult;
+import com.slowsql.agent.diagnosis.agent.LangChain4jDiagnosisAgent;
 import com.slowsql.agent.llm.LlmConfig;
-import com.slowsql.agent.tools.ToolBackend;
+import com.slowsql.agent.dbinspect.ToolBackend;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;

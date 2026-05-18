@@ -1,11 +1,13 @@
 package com.slowsql.agent.eval;
 
-import com.slowsql.agent.agent.LangChain4jDiagnosisAgent;
-import com.slowsql.agent.agent.memory.LayeredChatMemory;
+import com.slowsql.agent.eval.memcmp.MemoryComparisonReport;
+
+import com.slowsql.agent.diagnosis.agent.LangChain4jDiagnosisAgent;
+import com.slowsql.agent.diagnosis.memory.LayeredChatMemory;
 import com.slowsql.agent.llm.LlmConfig;
-import com.slowsql.agent.tools.DataSourceFactory;
-import com.slowsql.agent.tools.JdbcConfig;
-import com.slowsql.agent.tools.JdbcToolBackend;
+import com.slowsql.agent.dbinspect.DataSourceFactory;
+import com.slowsql.agent.dbinspect.JdbcConfig;
+import com.slowsql.agent.dbinspect.JdbcToolBackend;
 import com.zaxxer.hikari.HikariDataSource;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;

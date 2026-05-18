@@ -1,6 +1,6 @@
 package com.slowsql.agent.eval;
 
-import com.slowsql.agent.agent.DiagnosisResult;
+import com.slowsql.agent.diagnosis.api.DiagnosisResult;
 
 import java.util.List;
 import java.util.Map;

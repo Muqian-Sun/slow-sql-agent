@@ -1,6 +1,6 @@
 package com.slowsql.agent.eval;
 
-import com.slowsql.agent.agent.StubDiagnosisAgent;
+import com.slowsql.agent.diagnosis.agent.StubDiagnosisAgent;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
