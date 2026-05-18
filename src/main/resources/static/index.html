@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Slow SQL Agent — Engineering Logbook</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,400;9..144,500;9..144,600;9..144,700&family=EB+Garamond:ital,wght@0,400;0,500;1,400&family=IBM+Plex+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --paper: #f3eedf;
+            --paper-shade: #eae3cf;
+            --grid: rgba(60, 50, 30, 0.07);
+            --ink: #1a1612;
+            --ink-soft: #4a3f33;
+            --ink-faint: #8c7f6c;
+            --rule: #2c2418;
+            --vermillion: #c93829;
+            --vermillion-shade: #9a2a1f;
+            --serif-display: 'Fraunces', 'Times New Roman', serif;
+            --serif-body: 'EB Garamond', 'Georgia', serif;
+            --mono: 'IBM Plex Mono', 'SF Mono', Menlo, monospace;
+        }
+
+        * { box-sizing: border-box; }
+
+        html, body { margin: 0; padding: 0; }
+
+        body {
+            background: var(--paper);
+            background-image:
+                linear-gradient(var(--grid) 1px, transparent 1px),
+                linear-gradient(90deg, var(--grid) 1px, transparent 1px),
+                radial-gradient(circle at 20% 15%, rgba(140,120,80,0.08), transparent 55%),
+                radial-gradient(circle at 90% 85%, rgba(140,120,80,0.06), transparent 55%);
+            background-size: 24px 24px, 24px 24px, 100% 100%, 100% 100%;
+            color: var(--ink);
+            font-family: var(--serif-body);
+            font-size: 17px;
+            line-height: 1.55;
+            min-height: 100vh;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* 纸张噪点底纹 */
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            opacity: 0.35;
+            mix-blend-mode: multiply;
+            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.10 0 0 0 0 0.08 0 0 0 0 0.05 0 0 0 0.18 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+            z-index: 1;
+        }
+
+        .page {
+            position: relative;
+            z-index: 2;
+            max-width: 1080px;
+            margin: 0 auto;
+            padding: 56px 64px 96px;
+        }
+
+        /* ============ MASTHEAD ============ */
+        .masthead {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            align-items: end;
+            padding-bottom: 18px;
+            border-bottom: 3px double var(--rule);
+            margin-bottom: 28px;
+        }
+
+        .title {
+            font-family: var(--serif-display);
+            font-variation-settings: 'opsz' 144, 'wght' 700, 'SOFT' 0, 'WONK' 1;
+            font-size: 78px;
+            line-height: 0.92;
+            letter-spacing: -0.025em;
+            margin: 0;
+            color: var(--ink);
+        }
+        .title em {
+            font-style: italic;
+            font-variation-settings: 'opsz' 144, 'wght' 600, 'SOFT' 100, 'WONK' 1;
+            color: var(--vermillion);
+        }
+
+        .colophon {
+            text-align: right;
+            font-family: var(--mono);
+            font-size: 10.5px;
+            line-height: 1.5;
+            color: var(--ink-soft);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+        .colophon .vol { font-size: 11.5px; color: var(--vermillion); font-weight: 600; }
+
+        .lede {
+            font-family: var(--serif-body);
+            font-style: italic;
+            font-size: 19px;
+            line-height: 1.5;
+            color: var(--ink-soft);
+            max-width: 720px;
+            margin: 0 0 56px;
+        }
+        .lede::first-letter {
+            font-family: var(--serif-display);
+            font-variation-settings: 'opsz' 144, 'wght' 600;
+            font-size: 56px;
+            line-height: 0.85;
+            float: left;
+            padding: 8px 10px 0 0;
+            color: var(--vermillion);
+            font-style: normal;
+        }
+
+        /* ============ SECTION HEADINGS ============ */
+        .section {
+            margin: 40px 0;
+        }
+        .section-head {
+            display: flex;
+            align-items: baseline;
+            gap: 14px;
+            margin-bottom: 12px;
+        }
+        .section-num {
+            font-family: var(--mono);
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--vermillion);
+            text-transform: uppercase;
+            letter-spacing: 0.15em;
+            white-space: nowrap;
+            padding-top: 5px;
+        }
+        .section-head h2 {
+            font-family: var(--serif-display);
+            font-variation-settings: 'opsz' 48, 'wght' 600;
+            font-size: 28px;
+            line-height: 1.1;
+            margin: 0;
+            color: var(--ink);
+        }
+        .section-help {
+            font-family: var(--mono);
+            font-size: 10.5px;
+            color: var(--ink-faint);
+            margin-left: auto;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+
+        /* ============ FORM ============ */
+        .preset {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            margin-bottom: 22px;
+            padding: 11px 14px;
+            background: rgba(0,0,0,0.025);
+            border-left: 3px solid var(--vermillion);
+        }
+        .preset-tag {
+            font-family: var(--mono);
+            font-size: 10px;
+            font-weight: 600;
+            color: var(--ink-soft);
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+        }
+        select {
+            background: transparent;
+            color: var(--ink);
+            border: none;
+            border-bottom: 1px dashed var(--ink-soft);
+            padding: 4px 22px 4px 6px;
+            font-family: var(--serif-body);
+            font-size: 15px;
+            font-style: italic;
+            cursor: pointer;
+            min-width: 460px;
+            outline: none;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 6l5 5 5-5' stroke='%231a1612' stroke-width='1.2' fill='none'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 4px center;
+            background-size: 14px;
+        }
+        select:focus { border-bottom-color: var(--vermillion); }
+        select optgroup { font-family: var(--mono); font-style: normal; font-weight: 600; color: var(--ink); font-size: 12px; }
+        select option { font-family: var(--serif-body); font-style: italic; padding: 4px 0; }
+
+        textarea {
+            width: 100%;
+            background: rgba(255,253,245,0.55);
+            color: var(--ink);
+            border: 1px solid var(--rule);
+            border-radius: 0;
+            padding: 14px 16px;
+            font-family: var(--mono);
+            font-size: 14px;
+            line-height: 1.6;
+            resize: vertical;
+            outline: none;
+            transition: border-color 120ms, box-shadow 120ms;
+        }
+        textarea:focus {
+            border-color: var(--vermillion);
+            box-shadow: 3px 3px 0 var(--vermillion);
+        }
+        textarea#requirement {
+            font-family: var(--serif-body);
+            font-size: 16px;
+            font-style: italic;
+        }
+
+        /* ============ SUBMIT ============ */
+        .toolbar { margin-top: 32px; display: flex; align-items: center; gap: 24px; }
+        button#submit {
+            background: var(--ink);
+            color: var(--paper);
+            border: 1px solid var(--ink);
+            border-radius: 0;
+            padding: 16px 42px;
+            font-family: var(--mono);
+            font-size: 12.5px;
+            font-weight: 600;
+            letter-spacing: 0.22em;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: all 140ms;
+            box-shadow: 5px 5px 0 var(--vermillion);
+        }
+        button#submit:hover:not(:disabled) {
+            background: var(--paper);
+            color: var(--ink);
+            transform: translate(-2px, -2px);
+            box-shadow: 7px 7px 0 var(--vermillion);
+        }
+        button#submit:active:not(:disabled) {
+            transform: translate(2px, 2px);
+            box-shadow: 2px 2px 0 var(--vermillion);
+        }
+        button#submit:disabled {
+            background: var(--ink-faint);
+            border-color: var(--ink-faint);
+            color: var(--paper);
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+        .hotkey {
+            font-family: var(--mono);
+            font-size: 11px;
+            color: var(--ink-faint);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
+        .hotkey kbd {
+            font-family: var(--mono);
+            background: var(--paper-shade);
+            border: 1px solid var(--rule);
+            padding: 1px 6px;
+            font-size: 10.5px;
+        }
+
+        /* ============ OUTPUT / RESULT ============ */
+        #output { margin-top: 56px; }
+
+        /* loading */
+        .loading {
+            border-top: 1px solid var(--rule);
+            border-bottom: 1px solid var(--rule);
+            padding: 40px 0;
+            display: grid;
+            grid-template-columns: auto 1fr auto;
+            align-items: center;
+            gap: 28px;
+        }
+        .loading-mark {
+            font-family: var(--serif-display);
+            font-variation-settings: 'opsz' 144, 'wght' 700;
+            font-size: 48px;
+            color: var(--vermillion);
+            animation: pulse 1.4s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.35; }
+        }
+        .loading-step {
+            font-family: var(--serif-display);
+            font-variation-settings: 'opsz' 36, 'wght' 500;
+            font-style: italic;
+            font-size: 22px;
+            color: var(--ink);
+        }
+        .loading-detail {
+            font-family: var(--mono);
+            font-size: 11px;
+            color: var(--ink-faint);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            margin-top: 4px;
+        }
+        .loading-timer {
+            font-family: var(--serif-display);
+            font-variation-settings: 'opsz' 48, 'wght' 600;
+            font-size: 32px;
+            color: var(--ink-soft);
+            font-variant-numeric: tabular-nums;
+        }
+        .loading-timer .unit {
+            font-family: var(--mono);
+            font-size: 11px;
+            margin-left: 4px;
+            color: var(--ink-faint);
+        }
+
+        /* result blocks */
+        .verdict {
+            margin-top: 8px;
+            padding: 24px 0 28px;
+            border-top: 3px double var(--rule);
+            border-bottom: 1px solid var(--rule);
+        }
+        .verdict-row {
+            display: grid;
+            grid-template-columns: auto 1fr auto;
+            align-items: center;
+            gap: 28px;
+        }
+        .verdict-label {
+            font-family: var(--mono);
+            font-size: 10.5px;
+            color: var(--ink-soft);
+            text-transform: uppercase;
+            letter-spacing: 0.18em;
+        }
+        .verdict-outcome {
+            font-family: var(--serif-display);
+            font-variation-settings: 'opsz' 96, 'wght' 700, 'WONK' 1;
+            font-size: 56px;
+            line-height: 1;
+            letter-spacing: -0.015em;
+        }
+        .verdict-outcome.dj { color: #2f6b3a; }
+        .verdict-outcome.cur { color: #1f5b6e; }
+        .verdict-outcome.unsupported { color: var(--vermillion); font-style: italic; }
+        .verdict-conf {
+            font-family: var(--serif-display);
+            font-variation-settings: 'opsz' 48, 'wght' 500;
+            font-size: 32px;
+            color: var(--ink-soft);
+            font-variant-numeric: tabular-nums;
+            text-align: right;
+        }
+        .verdict-conf .unit {
+            font-family: var(--mono);
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            color: var(--ink-faint);
+            display: block;
+            margin-top: 2px;
+        }
+
+        /* stats byline */
+        .byline {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 18px;
+            padding: 16px 0;
+            border-bottom: 1px solid var(--rule);
+            font-family: var(--mono);
+            font-size: 11px;
+            color: var(--ink-soft);
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+            flex-wrap: wrap;
+        }
+        .byline-item b {
+            color: var(--ink);
+            font-size: 14px;
+            font-family: var(--serif-display);
+            font-variation-settings: 'opsz' 36, 'wght' 600;
+            text-transform: none;
+            letter-spacing: 0;
+            font-variant-numeric: tabular-nums;
+            margin-right: 5px;
+        }
+
+        /* result sections */
+        .case {
+            padding: 28px 0;
+            border-bottom: 1px solid var(--rule);
+            display: grid;
+            grid-template-columns: 140px 1fr;
+            gap: 36px;
+            align-items: start;
+        }
+        .case-tag {
+            font-family: var(--mono);
+            font-size: 10.5px;
+            color: var(--vermillion);
+            text-transform: uppercase;
+            letter-spacing: 0.15em;
+            padding-top: 4px;
+        }
+        .case-tag small {
+            display: block;
+            color: var(--ink-faint);
+            font-size: 9.5px;
+            margin-top: 4px;
+            letter-spacing: 0.08em;
+        }
+
+        pre.sql {
+            font-family: var(--mono);
+            font-size: 13.5px;
+            line-height: 1.7;
+            background: var(--paper-shade);
+            border-left: 3px solid var(--vermillion);
+            padding: 14px 18px;
+            overflow-x: auto;
+            margin: 0;
+            white-space: pre-wrap;
+            color: var(--ink);
+        }
+
+        ol.marginalia {
+            margin: 0;
+            padding: 0;
+            list-style: none;
+            counter-reset: roman;
+        }
+        ol.marginalia li {
+            counter-increment: roman;
+            padding: 8px 0 8px 36px;
+            position: relative;
+            font-family: var(--serif-body);
+            font-size: 15.5px;
+            line-height: 1.55;
+            border-bottom: 1px dotted var(--rule);
+            color: var(--ink);
+        }
+        ol.marginalia li:last-child { border-bottom: none; }
+        ol.marginalia li::before {
+            content: counter(roman, lower-roman) ".";
+            position: absolute;
+            left: 0;
+            top: 8px;
+            font-family: var(--serif-display);
+            font-variation-settings: 'opsz' 36, 'wght' 500;
+            font-style: italic;
+            font-size: 16px;
+            color: var(--vermillion);
+            width: 28px;
+            text-align: right;
+            padding-right: 8px;
+        }
+
+        /* error */
+        .error {
+            border: 2px solid var(--vermillion);
+            background: rgba(201, 56, 41, 0.06);
+            padding: 22px 24px;
+            position: relative;
+        }
+        .error::before {
+            content: "ERRATUM";
+            position: absolute;
+            top: -10px;
+            left: 16px;
+            background: var(--paper);
+            padding: 0 8px;
+            font-family: var(--mono);
+            font-size: 10.5px;
+            font-weight: 600;
+            letter-spacing: 0.2em;
+            color: var(--vermillion);
+        }
+        .error-body {
+            font-family: var(--mono);
+            font-size: 13px;
+            color: var(--ink);
+            line-height: 1.55;
+        }
+
+        /* footer */
+        .footer {
+            margin-top: 80px;
+            padding-top: 24px;
+            border-top: 1px solid var(--rule);
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            font-family: var(--mono);
+            font-size: 10.5px;
+            color: var(--ink-faint);
+            text-transform: uppercase;
+            letter-spacing: 0.12em;
+        }
+        .asterism {
+            text-align: center;
+            margin: 48px 0;
+            color: var(--ink-faint);
+            font-size: 14px;
+            letter-spacing: 0.6em;
+        }
+
+        @media (max-width: 720px) {
+            .page { padding: 32px 24px; }
+            .title { font-size: 48px; }
+            .masthead { grid-template-columns: 1fr; gap: 12px; }
+            .colophon { text-align: left; }
+            .case { grid-template-columns: 1fr; gap: 12px; }
+            .verdict-row { grid-template-columns: 1fr; gap: 12px; }
+            .verdict-outcome { font-size: 38px; }
+            select { min-width: 100%; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+
+        <!-- ============ MASTHEAD ============ -->
+        <header class="masthead">
+            <h1 class="title">The Slow <em>SQL</em><br>Logbook</h1>
+            <div class="colophon">
+                <div class="vol">VOL. I · No. 7</div>
+                <div>An engineering field-notes journal</div>
+                <div>for MySQL deep-pagination cases</div>
+                <div>· bound &amp; printed locally ·</div>
+            </div>
+        </header>
+
+        <p class="lede">
+            Submit a slow query and a sentence of business context. The agent reads schema, runs EXPLAIN, drafts a rewrite, and verifies semantic equivalence against a shadow database — its case notes are returned below, with marginalia.
+        </p>
+
+        <!-- ============ FORM ============ -->
+        <div class="preset">
+            <span class="preset-tag">⟨ ARCHIVE ⟩</span>
+            <select id="example-picker">
+                <optgroup label="改写 — deferred_join (不可改 API)">
+                    <option value="dj_pk">单表 PK 排序 — 最基础形态</option>
+                    <option value="dj_filter">WHERE 过滤 + 时间倒序 (走 idx_status_create)</option>
+                    <option value="dj_join">2 表 JOIN + 主表排序 (子查询取 PK)</option>
+                    <option value="dj_soft_delete">软删模式 WHERE deleted_at IS NULL</option>
+                    <option value="dj_nullable">可空列做主排序键 + PK tie-breaker</option>
+                </optgroup>
+                <optgroup label="改写 — cursor (可改 API, 无限滚动)">
+                    <option value="cur_pk_asc">单表 PK 升序游标</option>
+                    <option value="cur_composite">非 PK 排序 → 复合游标 (create_time, id)</option>
+                    <option value="cur_join">JOIN + 主表 PK 游标 (1:1 关联)</option>
+                    <option value="cur_nullable">可空列做游标键</option>
+                </optgroup>
+                <optgroup label="越界 — unsupported (改写无解)">
+                    <option value="oos_missing_idx">WHERE 列无索引 — 全表扫</option>
+                    <option value="oos_join_sort">ORDER BY 在 JOIN 副表</option>
+                    <option value="oos_groupby">GROUP BY 聚合分页</option>
+                    <option value="oos_function">函数列 ORDER BY (DATE(create_time))</option>
+                    <option value="oos_distinct">DISTINCT 去重分页</option>
+                    <option value="oos_dml">DML 误投递 — Agent 必须拒绝</option>
+                </optgroup>
+            </select>
+        </div>
+
+        <section class="section">
+            <div class="section-head">
+                <span class="section-num">§ I</span>
+                <h2>The Query</h2>
+                <span class="section-help">必填 · paste the slow SQL</span>
+            </div>
+            <textarea id="sql" rows="6" spellcheck="false"></textarea>
+        </section>
+
+        <section class="section">
+            <div class="section-head">
+                <span class="section-num">§ II</span>
+                <h2>Business Context</h2>
+                <span class="section-help">可选 · 帮 Agent 判定是否可改 API</span>
+            </div>
+            <textarea id="requirement" rows="3" spellcheck="false"></textarea>
+        </section>
+
+        <div class="toolbar">
+            <button id="submit">Open Case File</button>
+            <span class="hotkey"><kbd>⌘</kbd> + <kbd>Enter</kbd> to submit</span>
+        </div>
+
+        <div id="output"></div>
+
+        <footer class="footer">
+            <span>Set in Fraunces, EB Garamond &amp; IBM Plex Mono</span>
+            <span>Edition local · 8080</span>
+        </footer>
+
+    </div>
+
+    <script>
+        const $ = id => document.getElementById(id);
+        const submit = $('submit');
+        const output = $('output');
+        const sqlField = $('sql');
+        const reqField = $('requirement');
+        let timerInterval = null;
+        let stepInterval = null;
+
+        const EXAMPLES = {
+            dj_pk: {
+                sql: 'SELECT id, user_id, amount, create_time FROM orders ORDER BY id LIMIT 500000, 20',
+                requirement: '运营后台订单翻页, 按订单 id 倒序, 传统翻页 URL (page=N&size=20), 接口不能动'
+            },
+            dj_filter: {
+                sql: 'SELECT id, amount, create_time FROM orders WHERE status = 1 ORDER BY create_time DESC, id DESC LIMIT 100000, 30',
+                requirement: '财务后台已支付订单按下单时间倒序翻页, page 跳转 URL 模式, 不可改 API'
+            },
+            dj_join: {
+                sql: 'SELECT o.id, o.amount, u.name FROM orders o JOIN users u ON o.user_id = u.id WHERE o.status = 1 ORDER BY o.id LIMIT 80000, 20',
+                requirement: '客服后台订单审核页, 按订单 ID 翻页查看, 接口不能动'
+            },
+            dj_soft_delete: {
+                sql: 'SELECT id, user_id, amount, create_time FROM orders WHERE deleted_at IS NULL ORDER BY id DESC LIMIT 200000, 20',
+                requirement: '运营后台未删除订单倒序翻页, page 跳转 URL 模式, 接口不能动'
+            },
+            dj_nullable: {
+                sql: 'SELECT id, user_id, amount, pay_time FROM orders WHERE status = 1 ORDER BY pay_time, id LIMIT 80000, 20',
+                requirement: '财务对账后台已支付订单按支付时间升序翻页, 不可改 API'
+            },
+            cur_pk_asc: {
+                sql: 'SELECT id, user_id, amount, create_time FROM orders WHERE user_id = 100 ORDER BY id LIMIT 100000, 20',
+                requirement: 'C 端 APP 用户订单历史页, 下拉无限加载, 前端可改 API 走游标分页'
+            },
+            cur_composite: {
+                sql: 'SELECT id, user_id, amount FROM orders WHERE merchant_id = 50 ORDER BY create_time DESC LIMIT 50000, 50',
+                requirement: 'C 端商家详情页最近订单流, 按时间倒序无限滚动, 前端可以改成游标分页'
+            },
+            cur_join: {
+                sql: 'SELECT o.id, o.amount, u.name FROM orders o JOIN users u ON o.user_id = u.id WHERE o.merchant_id = 50 ORDER BY o.id DESC LIMIT 100000, 20',
+                requirement: '商家后台订单流 + 用户名展示, 下拉无限加载, 前端可改 API 走游标'
+            },
+            cur_nullable: {
+                sql: 'SELECT id, user_id, amount, pay_time FROM orders WHERE user_id = 100 AND pay_time IS NOT NULL ORDER BY pay_time DESC, id DESC LIMIT 50000, 20',
+                requirement: 'C 端用户已支付订单流, 下拉无限加载, 前端可改 API 走游标'
+            },
+            oos_missing_idx: {
+                sql: 'SELECT id, user_id, content FROM reviews WHERE rating = 5 ORDER BY id DESC LIMIT 50000, 20',
+                requirement: '商家后台五星好评翻页, 按 id 倒序传统翻页 URL, 不可改 API'
+            },
+            oos_join_sort: {
+                sql: 'SELECT o.id, o.amount, u.name FROM orders o JOIN users u ON o.user_id = u.id ORDER BY u.register_time DESC LIMIT 100000, 20',
+                requirement: '运营后台需要按用户注册时间排序订单列表, 传统翻页, 不可改 API'
+            },
+            oos_groupby: {
+                sql: 'SELECT merchant_id, SUM(amount) AS total FROM orders WHERE status = 1 GROUP BY merchant_id ORDER BY total DESC LIMIT 100000, 50',
+                requirement: '数据中台商家成交额排行, 翻页查看长尾商家, 传统翻页'
+            },
+            oos_function: {
+                sql: 'SELECT id, user_id, amount FROM orders WHERE status = 1 ORDER BY DATE(create_time) DESC, id DESC LIMIT 50000, 20',
+                requirement: '运营后台按下单日期(只看日期不看时分秒)倒序分页, 传统翻页 URL, 不可改'
+            },
+            oos_distinct: {
+                sql: 'SELECT DISTINCT user_id FROM orders WHERE status = 1 ORDER BY user_id LIMIT 80000, 100',
+                requirement: 'BI 后台导出有过订单的用户 ID 列表, 分页查看, 不可改 API'
+            },
+            oos_dml: {
+                sql: 'UPDATE orders SET status = 5 WHERE create_time < \'2023-01-01\' ORDER BY id LIMIT 100000, 1000',
+                requirement: '冷数据归档脚本误投递到 agent — agent 必须识别 DML 拒绝, 这不在改写范围'
+            }
+        };
+
+        function applyExample(key) {
+            const ex = EXAMPLES[key];
+            if (!ex) return;
+            sqlField.value = ex.sql;
+            reqField.value = ex.requirement;
+        }
+        applyExample('dj_pk');
+        $('example-picker').addEventListener('change', e => applyExample(e.target.value));
+
+        // ⌘/Ctrl + Enter 提交
+        document.addEventListener('keydown', e => {
+            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                e.preventDefault();
+                if (!submit.disabled) diagnose();
+            }
+        });
+
+        submit.addEventListener('click', diagnose);
+
+        const STEPS = [
+            { t: 0, label: 'Reading schema', detail: 'Inspecting table structure & indexes' },
+            { t: 8, label: 'Running EXPLAIN', detail: 'Asking the optimizer for its current plan' },
+            { t: 20, label: 'Drafting a rewrite', detail: 'Forming deferred join or cursor pagination' },
+            { t: 36, label: 'Verifying equivalence', detail: 'Shadow-DB double-run + row-level hashing' },
+            { t: 60, label: 'Settling the verdict', detail: 'Sealing the case note. Almost done.' }
+        ];
+
+        async function diagnose() {
+            const sql = sqlField.value.trim();
+            if (!sql) {
+                renderError('A query is required to begin. Please supply one in §I.');
+                return;
+            }
+
+            submit.disabled = true;
+            submit.textContent = 'In Session…';
+            const start = Date.now();
+
+            renderLoading();
+            const stepLabel = $('step-label');
+            const stepDetail = $('step-detail');
+            const timerEl = $('loading-timer');
+
+            timerInterval = setInterval(() => {
+                const elapsed = (Date.now() - start) / 1000;
+                timerEl.textContent = elapsed.toFixed(0);
+                const current = STEPS.filter(s => elapsed >= s.t).pop() || STEPS[0];
+                if (stepLabel.textContent !== current.label) {
+                    stepLabel.textContent = current.label;
+                    stepDetail.textContent = current.detail;
+                }
+            }, 250);
+
+            try {
+                const resp = await fetch('/api/diagnose', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sql, requirement: reqField.value.trim() })
+                });
+                clearInterval(timerInterval);
+
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    renderError((err.message || err.error || 'Unknown error') + ` (HTTP ${resp.status})`);
+                    return;
+                }
+                const data = await resp.json();
+                renderResult(data);
+            } catch (e) {
+                clearInterval(timerInterval);
+                renderError(`Network failure — ${e.message}`);
+            } finally {
+                submit.disabled = false;
+                submit.textContent = 'Open Case File';
+            }
+        }
+
+        function renderLoading() {
+            output.innerHTML = `
+                <div class="loading">
+                    <div class="loading-mark">¶</div>
+                    <div>
+                        <div class="loading-step" id="step-label">Reading schema</div>
+                        <div class="loading-detail" id="step-detail">Inspecting table structure &amp; indexes</div>
+                    </div>
+                    <div class="loading-timer"><span id="loading-timer">0</span><span class="unit">s elapsed</span></div>
+                </div>`;
+        }
+
+        function renderError(msg) {
+            output.innerHTML = `
+                <div class="asterism">⁂</div>
+                <div class="error">
+                    <div class="error-body">${escapeHtml(msg)}</div>
+                </div>`;
+        }
+
+        function renderResult(data) {
+            const r = data.result;
+            const s = data.stats;
+            const outcomeMeta = outcomeMetaFor(r.outcome);
+
+            let html = `
+                <div class="asterism">⁂</div>
+
+                <div class="verdict">
+                    <div class="verdict-row">
+                        <span class="verdict-label">verdict</span>
+                        <div class="verdict-outcome ${outcomeMeta.cls}">${outcomeMeta.label}</div>
+                        <div class="verdict-conf">${(r.confidence * 100).toFixed(0)}%<span class="unit">confidence</span></div>
+                    </div>
+                </div>
+
+                <div class="byline">
+                    <span class="byline-item"><b>${s.react_rounds}</b> ReAct rounds</span>
+                    <span class="byline-item"><b>${s.total_tool_calls}</b> tool calls</span>
+                    <span class="byline-item"><b>${s.summarizer_invocations}</b> summaries</span>
+                    <span class="byline-item"><b>${s.total_tokens.toLocaleString()}</b> tokens</span>
+                    <span class="byline-item"><b>${(s.elapsed_ms / 1000).toFixed(1)}</b>s elapsed</span>
+                </div>`;
+
+            if (r.rewrittenSql) {
+                html += `
+                    <div class="case">
+                        <div class="case-tag">§ III<br>Rewrite<small>SQL · suggested by agent</small></div>
+                        <pre class="sql">${escapeHtml(r.rewrittenSql)}</pre>
+                    </div>`;
+            }
+
+            if (r.assumptions && r.assumptions.length) {
+                html += `
+                    <div class="case">
+                        <div class="case-tag">§ IV<br>Assumptions<small>${r.assumptions.length} entries · roman lower</small></div>
+                        <ol class="marginalia">
+                            ${r.assumptions.map(a => `<li>${escapeHtml(a)}</li>`).join('')}
+                        </ol>
+                    </div>`;
+            }
+
+            if (r.additionalSuggestions && r.additionalSuggestions.length) {
+                html += `
+                    <div class="case">
+                        <div class="case-tag">§ V<br>Further<br>Direction<small>${r.additionalSuggestions.length} entries · advisory</small></div>
+                        <ol class="marginalia">
+                            ${r.additionalSuggestions.map(s => `<li>${escapeHtml(s)}</li>`).join('')}
+                        </ol>
+                    </div>`;
+            }
+
+            html += `<div class="asterism">⁂ · fin ·  ⁂</div>`;
+            output.innerHTML = html;
+        }
+
+        function outcomeMetaFor(outcome) {
+            if (outcome === 'REWRITTEN_DEFERRED_JOIN') return { cls: 'dj', label: 'Deferred Join' };
+            if (outcome === 'REWRITTEN_CURSOR') return { cls: 'cur', label: 'Cursor Pagination' };
+            return { cls: 'unsupported', label: 'Unsupported.' };
+        }
+
+        function escapeHtml(s) {
+            return String(s).replace(/[&<>"']/g, c =>
+                ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+        }
+    </script>
+</body>
+</html>

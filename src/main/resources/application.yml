@@ -1,0 +1,21 @@
+# Spring Boot 仅做服务化外壳; 实际配置 (LLM endpoint / DB) 仍走环境变量, 见 LlmConfig / JdbcConfig.
+spring:
+  application:
+    name: slow-sql-agent
+  # 不自动启动 JDBC AutoConfiguration — 我们用自己的 DataSourceFactory 显式管理 HikariCP
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+
+server:
+  port: 8080
+  # diagnose 是慢端点 (30s-2min), 给 Tomcat 留长一点空间
+  tomcat:
+    connection-timeout: 5m
+    keep-alive-timeout: 5m
+
+logging:
+  level:
+    com.slowsql.agent: INFO
+    dev.langchain4j: WARN
+    org.springframework: WARN

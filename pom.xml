@@ -20,9 +20,29 @@
         <langchain4j.version>1.12.1</langchain4j.version>
         <mysql.connector.version>8.3.0</mysql.connector.version>
         <hikaricp.version>5.1.0</hikaricp.version>
+        <spring.boot.version>3.4.0</spring.boot.version>
     </properties>
 
+    <dependencyManagement>
+        <dependencies>
+            <!-- 用 BOM import 而非 parent 继承, 保留我们已有 deps 的显式版本控制 -->
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring.boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
     <dependencies>
+        <!-- Spring Boot Web — REST 服务入口 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
         <!-- JSON 解析(读 samples/golden_set.json) -->
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
@@ -99,6 +119,20 @@
                     <source>17</source>
                     <target>17</target>
                 </configuration>
+            </plugin>
+            <!-- 打可执行 fat jar: mvn package → target/slow-sql-agent-*.jar, java -jar 即可启动 -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <version>${spring.boot.version}</version>
+                <configuration>
+                    <mainClass>com.slowsql.agent.SlowSqlAgentApplication</mainClass>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals><goal>repackage</goal></goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>
