@@ -26,7 +26,7 @@ import java.util.concurrent.TimeUnit;
  * 用来观察 "长难 SQL" 上:
  *   - LayeredChatMemory.summarizerInvocations: cycle 压缩是否真的被触发?
  *   - reactRounds vs totalToolCalls: 若 LLM 启用 parallel tool calling 则 AiMessage 远少于工具调用,
- *     说明 compressAfterToolCalls 阈值要按"工具调用次数"换算 — 已按此粒度统一
+ *     说明 出滑窗按 tool call 次数, 压缩按 token 阈值 (两路径解耦)
  *   - case 是否被 tool_call_limit 截断, 截断之前堆了多少 ReAct 周期
  *
  * 这不是测试 — 是观察工具, 数据本身是结论.
@@ -75,8 +75,8 @@ class ComplexCaseSummarizerProbeIT {
         EvalReport report = runner.run(config);
         List<RunResult> runs = report.rawRuns();
 
-        System.out.println("\n══════ Complex-case summarizer probe (compressAfterToolCalls="
-                + LayeredChatMemory.DEFAULT_COMPRESS_AFTER_TOOL_CALLS + ") ══════");
+        System.out.println("\n══════ Complex-case summarizer probe (tokenThreshold="
+                + LayeredChatMemory.DEFAULT_TOKEN_THRESHOLD + ") ══════");
         System.out.printf("%-22s %8s %10s %10s %10s %-40s %s%n",
                 "case_id", "rounds", "tokens", "tool_calls", "summ_inv", "tool_breakdown", "outcome/error");
         System.out.println("--------------------------------------------------------------------------------");

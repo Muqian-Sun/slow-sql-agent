@@ -36,55 +36,50 @@ import java.util.Objects;
  * **关键边界: 压缩只发生在 archive, recent (当前轮) 永不压缩**.
  *   recent 是 LLM 最近 K 轮的原始上下文, 必须保持高保真度供 LLM 看清最近做了什么.
  *
- * 延迟压缩策略:
- *   1. cycle 数超 K → 老 cycle 从 recent **挪到 archive 末尾**(无 LLM 调用, 原样保留)
- *   2. 持续累积, 直到触发任一条件:
- *        a. 估算总 token 超过 tokenThreshold (高保真兜底, 防 prompt 爆窗口)
- *        b. archive 中累计 tool call 次数 ≥ compressAfterToolCalls (常规路径).
- *           粒度按 ToolExecutionResultMessage 计数, 而不是按 AiMessage —
- *           LLM 启用 parallel tool calls 时一个 AiMessage 可含多个 toolReq /
- *           对应多个 ToolResult, 按 AiMessage 数算会让复杂 case 永远到不了阈值.
- *           工具调用次数与"上下文真正堆了多少"线性相关, 是更稳的触发信号.
- *   3. 任一触发 → 整个 archive(旧摘要 + 新 raw) 一起送 LLM 重压, 产出新摘要替换全部
+ * 两条独立策略, 各管一件事:
+ *
+ * 1. 出 recent 滑窗 (spillOverflowToArchive) — 按工具调用次数:
+ *    recent 保留最近 K 次工具调用 (ToolExecutionResultMessage 数), 超出的 ReAct
+ *    周期整段挪到 archive. 不调 LLM, 只是搬家. 粒度按 ToolResult 而非 AiMessage,
+ *    因为 LLM 启用 parallel tool calls 时一个 AiMessage 可含多个 toolReq, 按
+ *    AiMessage 数算会让 recent 大小不稳定. spill 切点对齐到 AiMessage(toolReq)
+ *    边界, 保证 cycle 完整 (孤儿 ToolResult 会让 OpenAI 兼容 API 报错).
+ *
+ * 2. archive 压缩 (compressArchive) — 按 token 占比:
+ *    估算总 token 超过 tokenThreshold (default 22400, ≈ 32k context 70%) 才
+ *    触发. 把 archive 里的旧摘要 + 新 raw 一起送 LLM 重压成一条新摘要. 这是
+ *    防 prompt 爆窗口的兜底机制, 不要求"必须经常触发" — 典型场景下 recent
+ *    + archive 总 token 远低于阈值, summarizer 不会跑, 也不烧 LLM 成本.
  *
  * 收益:
- *   - 简单 case (≤ keepCycles 轮 ReAct) 永远不进 archive → 0 额外 LLM 成本
- *   - 中等 case 在 compressAfterToolCalls 触发, 把早期 ReAct 周期压成一条摘要, 控制 prompt 增速
- *   - 长尾死循环 / 巨型 case 由 tokenThreshold 兜底防爆窗口
+ *   - 典型 case (5-12 轮 ReAct, 总 ≤ 10k token) 永远不调 summarizer → 0 额外 LLM 成本
+ *   - 长尾巨型 case (> 22k token) 才走压缩, 防止超过 context 上限
  *   - 旧摘要不会"独立堆积"; 始终保持 archive 头部最多一条摘要 + 后续新 raw 的形态
- *
- * cycle 截断单位:
- *   必须按"周期"(AiMessage + 后续 ToolExecutionResultMessage)粒度,
- *   按消息粒度会让 LLM 看到孤儿 tool request, OpenAI 兼容 API 直接报错.
  */
 public class LayeredChatMemory implements ChatMemory {
 
     private static final Logger log = LoggerFactory.getLogger(LayeredChatMemory.class);
 
-    /** 默认保留最近 K 个 ReAct 周期原样在 prompt 里. 经验值: 3 足够 LLM 看清最近脉络. */
-    public static final int DEFAULT_KEEP_CYCLES = 3;
+    /**
+     * 默认保留最近 K 次工具调用在 recent 区. 经验值: 3 足够 LLM 看清最近脉络.
+     * 单位是 ToolExecutionResultMessage 数, 不是 AiMessage 数 — parallel tool calls
+     * 下 recent 大小才稳定.
+     */
+    public static final int DEFAULT_KEEP_RECENT_TOOL_CALLS = 3;
 
     /**
      * 默认 token 阈值. 估算总 token 超过此值才触发 archive 的 LLM 压缩.
      * 22400 ≈ 32k context 上限的 70%, 给改写 SQL 字符串 + 工具响应留 30% 余量.
+     * 典型场景达不到 (5-12 轮 ReAct 总 token 几 k 量级), 这是兜底机制.
      */
     public static final int DEFAULT_TOKEN_THRESHOLD = 22_400;
-
-    /**
-     * 默认 tool call 触发阈值. archive 中累计 ToolExecutionResultMessage 数 ≥ 此值即触发压缩.
-     * 取 6: dj_005 / dj_006 实测 10-12 tool_calls (parallel 比例 ~1.5-1.7), keepCycles=3
-     * 在 recent 占 3-5 tool calls, archive 堆到 ≥ 6 即触发. 简单 case (≤ 5 tool_calls 总数)
-     * 不触发, 避免额外 LLM 成本.
-     */
-    public static final int DEFAULT_COMPRESS_AFTER_TOOL_CALLS = 6;
 
     /** 已压缩摘要 SystemMessage 的内容前缀, 用作"这条是已压缩摘要"的标记. */
     private static final String SUMMARY_PREFIX = "=== 历史摘要(早期 ReAct 周期, 已 LLM 语义压缩) ===\n";
 
     private final Object id;
-    private final int keepCycles;
+    private final int keepRecentToolCalls;
     private final int tokenThreshold;
-    private final int compressAfterToolCalls;
     private final KeyFactStore factStore;
     private final FactExtractor extractor;
     private final HistorySummarizer summarizer;
@@ -98,43 +93,35 @@ public class LayeredChatMemory implements ChatMemory {
      */
     private final List<ChatMessage> archive = new ArrayList<>();
 
-    /** 当前轮: 最近 keepCycles 个完整 ReAct 周期, 原样保留, 永不压缩. */
+    /** 当前轮: 最近 keepRecentToolCalls 次工具调用对应的完整 ReAct 周期, 原样保留, 永不压缩. */
     private final List<ChatMessage> recent = new ArrayList<>();
 
-    public LayeredChatMemory(Object id, int keepCycles, int tokenThreshold, int compressAfterToolCalls,
+    public LayeredChatMemory(Object id, int keepRecentToolCalls, int tokenThreshold,
                              KeyFactStore factStore, FactExtractor extractor,
                              HistorySummarizer summarizer) {
         this.id = Objects.requireNonNull(id);
-        this.keepCycles = keepCycles;
+        this.keepRecentToolCalls = keepRecentToolCalls;
         this.tokenThreshold = tokenThreshold;
-        this.compressAfterToolCalls = compressAfterToolCalls;
         this.factStore = Objects.requireNonNull(factStore);
         this.extractor = Objects.requireNonNull(extractor);
         this.summarizer = Objects.requireNonNull(summarizer);
     }
 
-    public LayeredChatMemory(Object id, int keepCycles, int tokenThreshold,
+    public LayeredChatMemory(Object id, int keepRecentToolCalls,
                              KeyFactStore factStore, FactExtractor extractor,
                              HistorySummarizer summarizer) {
-        this(id, keepCycles, tokenThreshold, DEFAULT_COMPRESS_AFTER_TOOL_CALLS,
+        this(id, keepRecentToolCalls, DEFAULT_TOKEN_THRESHOLD,
                 factStore, extractor, summarizer);
     }
 
-    public LayeredChatMemory(Object id, int keepCycles,
-                             KeyFactStore factStore, FactExtractor extractor,
-                             HistorySummarizer summarizer) {
-        this(id, keepCycles, DEFAULT_TOKEN_THRESHOLD, DEFAULT_COMPRESS_AFTER_TOOL_CALLS,
-                factStore, extractor, summarizer);
-    }
-
-    public LayeredChatMemory(Object id, int keepCycles,
+    public LayeredChatMemory(Object id, int keepRecentToolCalls,
                              KeyFactStore factStore, FactExtractor extractor) {
-        this(id, keepCycles, DEFAULT_TOKEN_THRESHOLD, DEFAULT_COMPRESS_AFTER_TOOL_CALLS,
+        this(id, keepRecentToolCalls, DEFAULT_TOKEN_THRESHOLD,
                 factStore, extractor, new NoOpHistorySummarizer());
     }
 
     public LayeredChatMemory(Object id) {
-        this(id, DEFAULT_KEEP_CYCLES, DEFAULT_TOKEN_THRESHOLD, DEFAULT_COMPRESS_AFTER_TOOL_CALLS,
+        this(id, DEFAULT_KEEP_RECENT_TOOL_CALLS, DEFAULT_TOKEN_THRESHOLD,
                 new KeyFactStore(), new FactExtractor(), new NoOpHistorySummarizer());
     }
 
@@ -157,9 +144,9 @@ public class LayeredChatMemory implements ChatMemory {
         }
         recent.add(message);
         spillOverflowToArchive();
-        if (hasRawInArchive()
-                && (estimatedTokens() > tokenThreshold
-                        || toolCallsInArchive() >= compressAfterToolCalls)) {
+        // 压缩只看 token: 防 prompt 爆窗口的兜底, 不要求"必须经常触发".
+        // 出滑窗 (上面 spillOverflowToArchive) 按 tool call 数, 跟 token 阈值完全解耦.
+        if (hasRawInArchive() && estimatedTokens() > tokenThreshold) {
             compressArchive();
         }
     }
@@ -207,11 +194,11 @@ public class LayeredChatMemory implements ChatMemory {
     // ------------------------------------------------------------------
 
     /**
-     * 把 recent 中超出 keepCycles 的最老 cycle 整段挪到 archive 末尾.
+     * 把 recent 中超出 keepRecentToolCalls 的最老 cycle 整段挪到 archive 末尾.
      * 这一步**不调 LLM**, 只是搬家.
      */
     private void spillOverflowToArchive() {
-        int keepFromIdx = findKeepFromIndex(recent, keepCycles);
+        int keepFromIdx = findKeepFromIndex(recent, keepRecentToolCalls);
         if (keepFromIdx <= 0) return;
         archive.addAll(recent.subList(0, keepFromIdx));
         recent.subList(0, keepFromIdx).clear();
@@ -220,24 +207,6 @@ public class LayeredChatMemory implements ChatMemory {
     /** archive 是否含未压缩 raw 消息(头部已压缩 SystemMessage 不算). */
     private boolean hasRawInArchive() {
         return archive.size() > existingSummaryCount();
-    }
-
-    /**
-     * archive 中累计 tool call 次数, 用 ToolExecutionResultMessage 为锚点计数 —
-     * parallel tool calling 下一个 AiMessage 可能产生多条 ToolResult, 按 ToolResult 数算
-     * 与"上下文真正堆了多少"线性相关. 已压缩摘要 SystemMessage 不计.
-     *
-     * 注: spillOverflowToArchive / findKeepFromIndex 仍按 AiMessage 锚点切 ReAct 周期,
-     * 保证 spill 时 cycle 边界对齐 (孤儿 ToolResult 会让 OpenAI 兼容 API 报错).
-     * 压缩触发判断用 tool call 数, spill 用 cycle 数, 两个粒度各取所长.
-     */
-    private int toolCallsInArchive() {
-        int prefix = existingSummaryCount();
-        int n = 0;
-        for (int i = prefix; i < archive.size(); i++) {
-            if (archive.get(i) instanceof ToolExecutionResultMessage) n++;
-        }
-        return n;
     }
 
     /**
@@ -330,17 +299,32 @@ public class LayeredChatMemory implements ChatMemory {
     }
 
     /**
-     * 从后往前找第 K 个"带 tool requests 的 AiMessage", 返回它在 all 中的下标.
-     * 若总周期数 < K, 返回 0(都保留).
+     * 从后往前数 k 个 ToolExecutionResultMessage, 然后向前对齐到最近一条
+     * 带 toolRequests 的 AiMessage, 返回该 AiMessage 在 all 中的下标作为 keep-from.
+     *
+     * 为什么这样:
+     *   - 按 ToolResult 数计, parallel tool calls 下 recent 大小线性正比上下文密度
+     *   - 切点必须对齐到 AiMessage(toolReq) 边界, 否则 recent 头部会出现孤儿
+     *     ToolExecutionResultMessage, OpenAI 兼容 API 会报"tool result with no
+     *     matching tool call request"错.
+     *
+     * 若总 ToolResult 数 < k, 返回 0(都保留).
      */
     static int findKeepFromIndex(List<ChatMessage> all, int k) {
         if (k <= 0 || all.isEmpty()) return 0;
-        int cyclesSeen = 0;
+        int toolResultsSeen = 0;
         for (int i = all.size() - 1; i >= 0; i--) {
-            ChatMessage m = all.get(i);
-            if (m instanceof AiMessage ai && ai.hasToolExecutionRequests()) {
-                cyclesSeen++;
-                if (cyclesSeen >= k) return i;
+            if (all.get(i) instanceof ToolExecutionResultMessage) {
+                toolResultsSeen++;
+                if (toolResultsSeen >= k) {
+                    // 向前找最近一条 AiMessage(toolReq), 作为 cycle 边界切点
+                    for (int j = i; j >= 0; j--) {
+                        if (all.get(j) instanceof AiMessage ai && ai.hasToolExecutionRequests()) {
+                            return j;
+                        }
+                    }
+                    return 0;
+                }
             }
         }
         return 0;

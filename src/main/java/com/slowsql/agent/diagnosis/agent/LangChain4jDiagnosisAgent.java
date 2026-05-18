@@ -151,7 +151,7 @@ public class LangChain4jDiagnosisAgent implements DiagnosisAgent {
         return switch (strategy) {
             case LAYERED -> new LayeredChatMemory(
                     "diagnose-" + System.nanoTime(),
-                    LayeredChatMemory.DEFAULT_KEEP_CYCLES,
+                    LayeredChatMemory.DEFAULT_KEEP_RECENT_TOOL_CALLS,
                     factStore, new FactExtractor(),
                     new LlmHistorySummarizer(model));
             case BASELINE_WINDOW -> MessageWindowChatMemory.withMaxMessages(
