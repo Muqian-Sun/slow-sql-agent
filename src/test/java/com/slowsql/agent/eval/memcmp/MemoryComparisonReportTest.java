@@ -126,6 +126,49 @@ class MemoryComparisonReportTest {
     }
 
     @Test
+    void outcomeMatrixCapturesLayeredOnlySuccessAsRescueSignal() {
+        // 关键场景: 难 case 上 baseline 撞墙 / layered 跑通 — 这是 layered 设计的核心价值,
+        // 但 reduction% 加权数字会把它整个剔除 (因为没 baseline tokens 配对).
+        // OutcomeMatrix 必须把这种 case 显式记为 layered_only_succeeded.
+        List<RunResult> layered = List.of(
+                runOk("case_A", 0, 100, 2),                       // 两边都跑通
+                runOk("case_B", 0, 200, 3),                       // layered 跑通
+                runErr("case_C", 0, "Tool call limit exceeded"),  // layered 失败 (baseline 救场)
+                runErr("case_D", 0, "boom"));                     // 两边都失败
+        List<RunResult> baseline = List.of(
+                runOk("case_A", 0, 200, 3),
+                runErr("case_B", 0, "Tool call limit exceeded"),  // ← baseline 失败, layered 救场
+                runOk("case_C", 0, 300, 4),
+                runErr("case_D", 0, "boom"));
+
+        MemoryComparisonReport report = MemoryComparisonReport.from("v1", layered, baseline);
+
+        var m = report.outcomeMatrix();
+        assertThat(m.bothSucceeded()).isEqualTo(1);          // case_A
+        assertThat(m.layeredOnlySucceeded()).isEqualTo(1);   // case_B (核心: layered 救场)
+        assertThat(m.baselineOnlySucceeded()).isEqualTo(1);  // case_C (反向)
+        assertThat(m.bothFailed()).isEqualTo(1);             // case_D
+        assertThat(m.noBaselineRun()).isZero();
+        assertThat(m.totalCases()).isEqualTo(4);
+        // 成功率: layered 成功 case_A + case_B / 4 = 50%; baseline 成功 case_A + case_C / 4 = 50%
+        assertThat(m.layeredSuccessRate()).isEqualTo(0.5);
+        assertThat(m.baselineSuccessRate()).isEqualTo(0.5);
+    }
+
+    @Test
+    void outcomeMatrixCountsNoBaselineRunSeparately() {
+        // baseline 没跑某 case (配置错配) 不算 layered 单边成功, 单独归类
+        List<RunResult> layered = List.of(runOk("case_X", 0, 100, 2));
+        List<RunResult> baseline = List.of();
+        var m = MemoryComparisonReport.from("v1", layered, baseline).outcomeMatrix();
+        assertThat(m.bothSucceeded()).isZero();
+        assertThat(m.layeredOnlySucceeded()).isZero();
+        assertThat(m.noBaselineRun()).isEqualTo(1);
+        // 成功率分母排除 noBaselineRun
+        assertThat(m.layeredSuccessRate()).isZero();
+    }
+
+    @Test
     void stdDevReportsMultiIterSpread() {
         // 同 case 三次跑 token 差异很大 — stdDev 应非零
         List<RunResult> layered = List.of(
