@@ -147,9 +147,11 @@ public class DiagnosisTools {
         }
     }
 
-    @Tool("查询本次诊断过程中已累积的'关键事实'摘要 — 来自之前每次 getTableInfo / runExplain / " +
+    @Tool("查询本次诊断过程中已累积的事实摘要 — 来自之前每次 getTableInfo / runExplain / " +
             "verifyResultEquivalence 返回时自动抽出的紧凑 fact (schema/plan/verify 三大类). " +
-            "用法: 当你调过多次工具, 想用一条压缩摘要刷新记忆(而不是重读原始大 JSON), 调一次 recallFacts. " +
+            "**调用时机**: 当你对之前已经查询过的某些数据的确切值不太清楚时使用 — 比如忘了 " +
+            "某张表的 PK 列、某个索引的字段顺序, 或不确定上次 EXPLAIN 的 rows 估算. 不是常规步骤, " +
+            "不要每次诊断都调一次. " +
             "可选传 category 过滤: 'schema' / 'plan' / 'verify' / 空串=全部. " +
             "输出 JSON: {status:'ok', total_count, facts:[{category, subject, detail}, ...]}.")
     public String recallFacts(
