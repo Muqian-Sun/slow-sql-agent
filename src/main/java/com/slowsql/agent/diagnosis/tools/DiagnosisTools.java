@@ -8,7 +8,6 @@ import com.slowsql.agent.diagnosis.tools.result.ToolJson;
 
 import com.slowsql.agent.diagnosis.memory.KeyFact;
 import com.slowsql.agent.diagnosis.memory.KeyFactStore;
-import com.slowsql.agent.eval.AgentStatsListener;
 import com.slowsql.agent.tracing.ToolCallEvent;
 import com.slowsql.agent.tracing.TraceCollector;
 import dev.langchain4j.agent.tool.P;
@@ -32,8 +31,9 @@ import java.util.concurrent.ConcurrentHashMap;
  *   - 真正的查询逻辑下沉到 ToolBackend, 方便 mock / 真实切换.
  *   - ToolBackend 返回结构化 record, 这层负责:
  *       (a) 序列化成 JSON 字符串送给 LLM(LLM 拿到的全是干净 JSON, 不是混着 PASS/FAIL/key=value 的杂字符串)
- *       (b) 从 record 提取 status / reason 喂给 AgentStatsListener
- *   - 每次调用同步打到 AgentStatsListener, 由评测层统计调用次数 / 重复率 / 失败原因.
+ *       (b) 从 record 提取 status / reason 喂给 ToolObserver
+ *   - 每次调用同步打到 ToolObserver — 评测层 (AgentStatsListener) 通过实现该接口订阅,
+ *     工具层不知道评测层的存在.
  *   - 任何意外异常都吞成结构化 JSON, LLM 永远拿到能读的 string, 触发 ReAct 自纠正.
  */
 public class DiagnosisTools {
@@ -64,14 +64,14 @@ public class DiagnosisTools {
     public static final int LIMIT_VERIFY_TOTAL = 15;
 
     private final ToolBackend backend;
-    private final AgentStatsListener stats;
+    private final ToolObserver stats;
     private final KeyFactStore factStore;
     private final TraceCollector trace;
     private final Map<String, Integer> callCount = new ConcurrentHashMap<>();
     /** verify 累计调用次数 (不论参数), 用于 LIMIT_VERIFY_TOTAL 兜底. */
     private int verifyTotalCount = 0;
 
-    public DiagnosisTools(ToolBackend backend, AgentStatsListener stats, KeyFactStore factStore,
+    public DiagnosisTools(ToolBackend backend, ToolObserver stats, KeyFactStore factStore,
                           TraceCollector trace) {
         this.backend = Objects.requireNonNull(backend);
         this.stats = Objects.requireNonNull(stats);
@@ -79,12 +79,12 @@ public class DiagnosisTools {
         this.trace = Objects.requireNonNull(trace);
     }
 
-    public DiagnosisTools(ToolBackend backend, AgentStatsListener stats, KeyFactStore factStore) {
+    public DiagnosisTools(ToolBackend backend, ToolObserver stats, KeyFactStore factStore) {
         this(backend, stats, factStore, TraceCollector.noOp());
     }
 
     /** 兼容旧调用 — 用空 KeyFactStore. 仅用于不需要 recallFacts 的 mock 链路. */
-    public DiagnosisTools(ToolBackend backend, AgentStatsListener stats) {
+    public DiagnosisTools(ToolBackend backend, ToolObserver stats) {
         this(backend, stats, new KeyFactStore(), TraceCollector.noOp());
     }
 

@@ -10,7 +10,7 @@ import java.util.Map;
  * - LangChain4j ChatModelListener 钩 LLM 响应(reactRounds / totalTokens)
  * - Spring AOP 切 @Tool 方法(toolCallCount / sameParamRepeats / failuresByReason)
  */
-public class AgentStatsListener {
+public class AgentStatsListener implements com.slowsql.agent.diagnosis.tools.ToolObserver {
 
     private int reactRounds = 0;
     private long totalTokens = 0;
@@ -32,11 +32,13 @@ public class AgentStatsListener {
         totalTokens += tokens;
     }
 
+    @Override
     public void onToolCall(String toolName, String argsFingerprint) {
         toolCallCount.merge(toolName, 1, Integer::sum);
         sameParamRepeats.merge(toolName + ":" + argsFingerprint, 1, Integer::sum);
     }
 
+    @Override
     public void onToolFailure(String reason) {
         failuresByReason.merge(reason, 1, Integer::sum);
     }
@@ -45,6 +47,7 @@ public class AgentStatsListener {
      * verify 工具调用结果上报. pass=true 时累计 verifyPassCount, 并记录 reductionPct + speedupX (都可空).
      * 注: status='error' 的情况由 onToolFailure 单独走 — 不算 pass 也不算 fail.
      */
+    @Override
     public void onVerifyResult(boolean pass, Double reductionPct, Double speedupX) {
         verifyCallCount++;
         if (pass) {
