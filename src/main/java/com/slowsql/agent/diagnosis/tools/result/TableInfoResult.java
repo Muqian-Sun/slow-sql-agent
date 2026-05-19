@@ -77,22 +77,14 @@ public record TableInfoResult(
                         idx.unique() ? "[U]" : "",
                         cols == null ? "?" : cols,
                         idx.cardinality() != null && idx.cardinality() > 0
-                                ? "~" + compactNum(idx.cardinality()) : ""));
+                                ? "~" + FactFormat.compactNum(idx.cardinality()) : ""));
             }
         }
         if (pk != null) detail.append("pk=").append(pk).append("; ");
         if (estimatedRows != null && estimatedRows > 0) {
-            detail.append("rows~").append(compactNum(estimatedRows)).append("; ");
+            detail.append("rows~").append(FactFormat.compactNum(estimatedRows)).append("; ");
         }
         if (!indexBlurbs.isEmpty()) detail.append("idx=").append(String.join(",", indexBlurbs));
         store.put(KeyFact.schema("table=" + table, detail.toString().trim()));
-    }
-
-    /** 1234567 → 1.23M, 1234 → 1.2K. 把大数压短让 fact 不噪音. */
-    private static String compactNum(long n) {
-        if (n < 1000) return String.valueOf(n);
-        if (n < 1_000_000) return String.format("%.1fK", n / 1000.0);
-        if (n < 1_000_000_000) return String.format("%.1fM", n / 1_000_000.0);
-        return String.format("%.1fG", n / 1_000_000_000.0);
     }
 }

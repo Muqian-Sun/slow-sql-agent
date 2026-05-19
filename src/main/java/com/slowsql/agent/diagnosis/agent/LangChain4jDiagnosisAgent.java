@@ -8,6 +8,7 @@ import com.slowsql.agent.diagnosis.api.OutcomeType;
 import com.slowsql.agent.diagnosis.memory.KeyFactStore;
 import com.slowsql.agent.diagnosis.memory.LayeredChatMemory;
 import com.slowsql.agent.diagnosis.memory.ToolCallWindowChatMemory;
+import com.slowsql.agent.tracing.TraceCollector;
 import com.slowsql.agent.diagnosis.memory.LlmHistorySummarizer;
 import com.slowsql.agent.eval.AgentStatsListener;
 import com.slowsql.agent.llm.ChatModelFactory;
@@ -91,7 +92,7 @@ public class LangChain4jDiagnosisAgent implements DiagnosisAgent {
     private final AgentStatsListener stats;
     private final ChatMemory chatMemory;
     private final MemoryStrategy memoryStrategy;
-    private final com.slowsql.agent.tracing.TraceCollector trace;
+    private final TraceCollector trace;
 
     public LangChain4jDiagnosisAgent(LlmConfig llmConfig, ToolBackend toolBackend) {
         this(llmConfig, toolBackend, MemoryStrategy.LAYERED);
@@ -108,7 +109,7 @@ public class LangChain4jDiagnosisAgent implements DiagnosisAgent {
             LlmConfig llmConfig, ToolBackend toolBackend, MemoryStrategy strategy) {
         this.memoryStrategy = strategy;
         this.stats = new AgentStatsListener();
-        this.trace = new com.slowsql.agent.tracing.TraceCollector();
+        this.trace = new TraceCollector();
         ChatModel model = ChatModelFactory.build(
                 llmConfig,
                 List.of(new StatsCollectingListener(stats)));
@@ -186,7 +187,7 @@ public class LangChain4jDiagnosisAgent implements DiagnosisAgent {
     }
 
     /** 暴露 TraceCollector 给 EvalRunner 跑完 case 后落 trace JSON. */
-    public com.slowsql.agent.tracing.TraceCollector trace() {
+    public TraceCollector trace() {
         return trace;
     }
 

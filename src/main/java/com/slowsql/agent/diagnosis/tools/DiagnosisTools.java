@@ -93,35 +93,25 @@ public class DiagnosisTools {
             "estimated_rows, row_count_note}. 在判断主键/索引/字段类型前必须先调.")
     public String getTableInfo(
             @P("表名, 例如 orders / users / products") String tableName) {
-        long t0 = System.nanoTime();
-        long startedMs = trace.elapsedMs();
-        String argsJson = argsJson("tableName", tableName);
-        String resultJson = null;
-        boolean failed = false;
-        String failReason = null;
+        ToolCall call = new ToolCall("getTableInfo", fp(tableName), argsJson("tableName", tableName));
         try {
-            String argsFp = fp(tableName);
-            stats.onToolCall("getTableInfo", argsFp);
-            checkLimit("getTableInfo", argsFp);
+            call.start();
             TableInfoResult r = backend.describeTable(tableName);
             if (r.isError()) {
                 stats.onToolFailure(r.reason());
-                failed = true; failReason = r.reason();
+                call.markFailed(r.reason());
             }
             r.exportFactsTo(factStore);
-            resultJson = r.toJson();
-            return resultJson;
+            return call.done(r.toJson());
         } catch (ToolCallLimitExceededException e) {
-            failed = true; failReason = "tool_call_limit_exceeded";
+            call.markFailed("tool_call_limit_exceeded");
             throw e;
         } catch (Exception e) {
             stats.onToolFailure("internal_error");
-            failed = true; failReason = "internal_error";
-            resultJson = TableInfoResult.error("internal_error", tableName).toJson();
-            return resultJson;
+            call.markFailed("internal_error");
+            return call.done(TableInfoResult.error("internal_error", tableName).toJson());
         } finally {
-            trace.record(new ToolCallEvent(startedMs, "getTableInfo", argsJson, resultJson,
-                    (System.nanoTime() - t0) / 1_000_000, failed, failReason));
+            call.record();
         }
     }
 
@@ -130,35 +120,25 @@ public class DiagnosisTools {
             "用于确认是否真的命中深分页扫描.")
     public String runExplain(
             @P("待诊断的 SQL, 必须是合法可解析的查询语句") String sql) {
-        long t0 = System.nanoTime();
-        long startedMs = trace.elapsedMs();
-        String argsJson = argsJson("sql", sql);
-        String resultJson = null;
-        boolean failed = false;
-        String failReason = null;
+        ToolCall call = new ToolCall("runExplain", fp(sql), argsJson("sql", sql));
         try {
-            String argsFp = fp(sql);
-            stats.onToolCall("runExplain", argsFp);
-            checkLimit("runExplain", argsFp);
+            call.start();
             ExplainResult r = backend.explain(sql);
             if (r.isError()) {
                 stats.onToolFailure(r.reason());
-                failed = true; failReason = r.reason();
+                call.markFailed(r.reason());
             }
             r.exportFactsTo(factStore);
-            resultJson = r.toJson();
-            return resultJson;
+            return call.done(r.toJson());
         } catch (ToolCallLimitExceededException e) {
-            failed = true; failReason = "tool_call_limit_exceeded";
+            call.markFailed("tool_call_limit_exceeded");
             throw e;
         } catch (Exception e) {
             stats.onToolFailure("internal_error");
-            failed = true; failReason = "internal_error";
-            resultJson = ExplainResult.error("internal_error", e.getMessage()).toJson();
-            return resultJson;
+            call.markFailed("internal_error");
+            return call.done(ExplainResult.error("internal_error", e.getMessage()).toJson());
         } finally {
-            trace.record(new ToolCallEvent(startedMs, "runExplain", argsJson, resultJson,
-                    (System.nanoTime() - t0) / 1_000_000, failed, failReason));
+            call.record();
         }
     }
 
@@ -183,46 +163,36 @@ public class DiagnosisTools {
     public String verifyResultEquivalence(
             @P("原始 SQL") String originalSql,
             @P("改写后的 SQL") String rewrittenSql) {
-        long t0 = System.nanoTime();
-        long startedMs = trace.elapsedMs();
         // verify 是最关键的追因点 — args 同时记 originalSql + rewrittenSql, 一眼看 LLM 试了什么
         Map<String, Object> args = new LinkedHashMap<>();
         args.put("originalSql", originalSql);
         args.put("rewrittenSql", rewrittenSql);
-        String argsJson = ToolJson.toJson(args);
-        String resultJson = null;
-        boolean failed = false;
-        String failReason = null;
+        ToolCall call = new ToolCall("verifyResultEquivalence", fp(rewrittenSql), ToolJson.toJson(args));
         try {
-            String argsFp = fp(rewrittenSql);
-            stats.onToolCall("verifyResultEquivalence", argsFp);
-            checkLimit("verifyResultEquivalence", argsFp);
+            call.start();
             checkVerifyTotalLimit();
             VerifyResult r = backend.verifyEquivalence(originalSql, rewrittenSql);
             if (r.isError()) {
                 stats.onToolFailure(r.reason());
-                failed = true; failReason = r.reason();
+                call.markFailed(r.reason());
             } else {
                 stats.onVerifyResult(r.isPass(), r.rowsReductionPct(), r.speedupX());
                 if (r.isFail()) {
                     stats.onToolFailure("verify_fail");
-                    failed = true; failReason = "verify_fail:" + r.reason();
+                    call.markFailed("verify_fail:" + r.reason());
                 }
             }
             r.exportFactsTo(factStore);
-            resultJson = r.toJson();
-            return resultJson;
+            return call.done(r.toJson());
         } catch (ToolCallLimitExceededException e) {
-            failed = true; failReason = "tool_call_limit_exceeded";
+            call.markFailed("tool_call_limit_exceeded");
             throw e;
         } catch (Exception e) {
             stats.onToolFailure("internal_error");
-            failed = true; failReason = "internal_error";
-            resultJson = VerifyResult.error("internal_error", e.getMessage()).toJson();
-            return resultJson;
+            call.markFailed("internal_error");
+            return call.done(VerifyResult.error("internal_error", e.getMessage()).toJson());
         } finally {
-            trace.record(new ToolCallEvent(startedMs, "verifyResultEquivalence", argsJson, resultJson,
-                    (System.nanoTime() - t0) / 1_000_000, failed, failReason));
+            call.record();
         }
     }
 
@@ -235,16 +205,9 @@ public class DiagnosisTools {
             "输出 JSON: {status:'ok', total_count, facts:[{category, subject, detail}, ...]}.")
     public String recallFacts(
             @P("可选 category 过滤: schema / plan / verify, 或空串取全部") String category) {
-        long t0 = System.nanoTime();
-        long startedMs = trace.elapsedMs();
-        String argsJson = argsJson("category", category);
-        String resultJson = null;
-        boolean failed = false;
-        String failReason = null;
+        ToolCall call = new ToolCall("recallFacts", fp(category), argsJson("category", category));
         try {
-            String argsFp = fp(category);
-            stats.onToolCall("recallFacts", argsFp);
-            checkLimit("recallFacts", argsFp);
+            call.start();
             List<KeyFact> snap = factStore.snapshot();
             if (category != null && !category.isBlank()) {
                 String wanted = category.trim();
@@ -254,23 +217,20 @@ public class DiagnosisTools {
             body.put("status", "ok");
             body.put("total_count", snap.size());
             body.put("facts", snap);
-            resultJson = ToolJson.toJson(body);
-            return resultJson;
+            return call.done(ToolJson.toJson(body));
         } catch (ToolCallLimitExceededException e) {
-            failed = true; failReason = "tool_call_limit_exceeded";
+            call.markFailed("tool_call_limit_exceeded");
             throw e;
         } catch (Exception e) {
             stats.onToolFailure("internal_error");
-            failed = true; failReason = "internal_error";
+            call.markFailed("internal_error");
             Map<String, Object> err = new LinkedHashMap<>();
             err.put("status", "error");
             err.put("reason", "internal_error");
             err.put("message", e.getMessage());
-            resultJson = ToolJson.toJson(err);
-            return resultJson;
+            return call.done(ToolJson.toJson(err));
         } finally {
-            trace.record(new ToolCallEvent(startedMs, "recallFacts", argsJson, resultJson,
-                    (System.nanoTime() - t0) / 1_000_000, failed, failReason));
+            call.record();
         }
     }
 
@@ -323,6 +283,67 @@ public class DiagnosisTools {
         } catch (Exception e) {
             // SHA-1 必然存在, fallback 仅为编译器满意
             return Integer.toHexString(s.hashCode());
+        }
+    }
+
+    /**
+     * 单次 @Tool 方法的状态机封装 — 抽掉每个工具方法重复 6 次以上的 try/catch/finally boilerplate:
+     * 起始时间戳 / argsJson / resultJson / failed 状态 / 终结写 trace event.
+     *
+     * 用法模板:
+     * <pre>
+     *   ToolCall call = new ToolCall(toolName, argsFp, argsJson);
+     *   try {
+     *       call.start();                       // onToolCall + checkLimit, 可能抛 ToolCallLimitExceeded
+     *       Result r = backend.xxx();
+     *       if (r.isError()) { stats.onToolFailure(r.reason()); call.markFailed(r.reason()); }
+     *       return call.done(r.toJson());
+     *   } catch (ToolCallLimitExceededException e) { call.markFailed("tool_call_limit_exceeded"); throw e; }
+     *     catch (Exception e) { ...; call.markFailed("internal_error"); return call.done(errorJson); }
+     *   finally { call.record(); }
+     * </pre>
+     *
+     * 不当作 inner static 是因为它要访问外部 {@link #stats} / {@link #trace} / {@link #checkLimit},
+     * 当作 inner class 让调用站点更短 (不用每次传 stats/trace 进 ctor).
+     */
+    private final class ToolCall {
+        private final long t0 = System.nanoTime();
+        private final long startedMs = trace.elapsedMs();
+        private final String toolName;
+        private final String argsFp;
+        private final String argsJson;
+        private String resultJson;
+        private boolean failed;
+        private String failReason;
+
+        ToolCall(String toolName, String argsFp, String argsJson) {
+            this.toolName = toolName;
+            this.argsFp = argsFp;
+            this.argsJson = argsJson;
+        }
+
+        /** stats 上报 + 上限检查. 拿出 ctor 让 ToolCallLimitExceededException 能被外层 try 捕获. */
+        void start() {
+            stats.onToolCall(toolName, argsFp);
+            checkLimit(toolName, argsFp);
+        }
+
+        void markFailed(String reason) {
+            this.failed = true;
+            this.failReason = reason;
+        }
+
+        /** 正常路径返回工具 JSON, 同时记下 resultJson 供 record() 用. */
+        String done(String json) {
+            this.resultJson = json;
+            return json;
+        }
+
+        /** finally 里调一次, 把累积的状态打成 ToolCallEvent 写入 trace. */
+        void record() {
+            trace.record(new ToolCallEvent(
+                    startedMs, toolName, argsJson, resultJson,
+                    (System.nanoTime() - t0) / 1_000_000, failed, failReason));
         }
     }
 }

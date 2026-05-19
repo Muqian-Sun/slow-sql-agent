@@ -59,11 +59,11 @@ public record ExplainResult(
             if (detail.length() > 0) detail.append(" | ");
             detail.append(table).append(":").append(type)
                     .append("/").append(key.isBlank() ? "-" : key);
-            if (n > 0) detail.append(",rows=").append(compactNum(n));
+            if (n > 0) detail.append(",rows=").append(FactFormat.compactNum(n));
             if (!extra.isBlank()) detail.append(",extra=").append(extra);
         }
         if (totalRows > 0) {
-            detail.append(" [total_rows=").append(compactNum(totalRows)).append(']');
+            detail.append(" [total_rows=").append(FactFormat.compactNum(totalRows)).append(']');
         }
         // last_explain 多次会覆盖, 与之前 FactExtractor 行为一致
         store.put(KeyFact.plan("last_explain", detail.toString()));
@@ -77,10 +77,4 @@ public record ExplainResult(
         try { return Long.parseLong(o.toString()); } catch (NumberFormatException e) { return 0; }
     }
 
-    private static String compactNum(long n) {
-        if (n < 1000) return String.valueOf(n);
-        if (n < 1_000_000) return String.format("%.1fK", n / 1000.0);
-        if (n < 1_000_000_000) return String.format("%.1fM", n / 1_000_000.0);
-        return String.format("%.1fG", n / 1_000_000_000.0);
-    }
 }
