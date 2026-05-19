@@ -1,9 +1,12 @@
 package com.slowsql.agent.diagnosis.tools.result;
 
+import com.slowsql.agent.diagnosis.memory.KeyFact;
+import com.slowsql.agent.diagnosis.memory.KeyFactStore;
 import com.slowsql.agent.diagnosis.tools.ErrorCategory;
 
 import com.slowsql.agent.diagnosis.tools.HintCatalog;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -30,7 +33,7 @@ public record TableInfoResult(
         List<IndexEntry> indexes,
         Long estimatedRows,
         String rowCountNote
-) {
+) implements FactExportable {
     public record IndexEntry(
             String name,
             boolean unique,
@@ -55,4 +58,41 @@ public record TableInfoResult(
     public boolean isError() { return "error".equals(status); }
 
     public String toJson() { return ToolJson.toJson(this); }
+
+    @Override
+    public void exportFactsTo(KeyFactStore store) {
+        // 失败 / 没 table 名 → 没 schema fact 可导
+        if (isError() || table == null || table.isBlank()) return;
+
+        StringBuilder detail = new StringBuilder();
+        // 主键 + 索引摘要
+        String pk = null;
+        List<String> indexBlurbs = new ArrayList<>();
+        if (indexes != null) {
+            for (IndexEntry idx : indexes) {
+                String cols = idx.columns() == null ? null : String.join(",", idx.columns());
+                if ("PRIMARY".equals(idx.name()) && cols != null) pk = cols;
+                indexBlurbs.add(String.format("%s%s(%s)%s",
+                        idx.name(),
+                        idx.unique() ? "[U]" : "",
+                        cols == null ? "?" : cols,
+                        idx.cardinality() != null && idx.cardinality() > 0
+                                ? "~" + compactNum(idx.cardinality()) : ""));
+            }
+        }
+        if (pk != null) detail.append("pk=").append(pk).append("; ");
+        if (estimatedRows != null && estimatedRows > 0) {
+            detail.append("rows~").append(compactNum(estimatedRows)).append("; ");
+        }
+        if (!indexBlurbs.isEmpty()) detail.append("idx=").append(String.join(",", indexBlurbs));
+        store.put(KeyFact.schema("table=" + table, detail.toString().trim()));
+    }
+
+    /** 1234567 → 1.23M, 1234 → 1.2K. 把大数压短让 fact 不噪音. */
+    private static String compactNum(long n) {
+        if (n < 1000) return String.valueOf(n);
+        if (n < 1_000_000) return String.format("%.1fK", n / 1000.0);
+        if (n < 1_000_000_000) return String.format("%.1fM", n / 1_000_000.0);
+        return String.format("%.1fG", n / 1_000_000_000.0);
+    }
 }

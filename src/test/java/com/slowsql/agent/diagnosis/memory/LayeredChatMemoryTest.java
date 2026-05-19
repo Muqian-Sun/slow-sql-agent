@@ -35,8 +35,10 @@ class LayeredChatMemoryTest {
     }
 
     @Test
-    void factsAreExtractedToStoreButNotInjectedIntoSystem() {
-        // 新语义: facts 只入 KeyFactStore 不自动注入 system, 由 LLM 主动调 recallFacts 拉.
+    void chatMemoryDoesNotExtractFactsOnItsOwn() {
+        // 重构后: fact 抽取归 DiagnosisTools 在 @Tool 返回前调 result.exportFactsTo,
+        // LayeredChatMemory.add(ToolExecutionResultMessage) **不再**做 fact 抽取.
+        // 这里把 ToolResult 直接喂给 memory, factStore 应该保持空.
         LayeredChatMemory mem = new LayeredChatMemory("t");
         mem.add(SystemMessage.from("SYS_BASE"));
         mem.add(UserMessage.from("USR"));
@@ -48,11 +50,9 @@ class LayeredChatMemoryTest {
         // system 保持原样, 不掺 facts
         SystemMessage sys = (SystemMessage) mem.messages().get(0);
         assertThat(sys.text()).isEqualTo("SYS_BASE");
-        assertThat(sys.text()).doesNotContain("已确认事实");
 
-        // facts 进入 KeyFactStore, 由 recallFacts 工具暴露
-        assertThat(mem.factStore().size()).isEqualTo(1);
-        assertThat(mem.factStore().render()).contains("table=orders");
+        // factStore 保持空 — memory 路径不再做 fact 抽取
+        assertThat(mem.factStore().size()).isZero();
     }
 
     @Test
@@ -60,7 +60,7 @@ class LayeredChatMemoryTest {
         // 新延迟压缩策略: 超 K 的老 cycle 进 pending 而非立即丢, 总 token 未到阈值时不调 LLM.
         // 这条 case 用默认阈值 + 极少消息 → 不触发压缩, pending 累积全部老 cycle.
         LayeredChatMemory mem = new LayeredChatMemory("t", 2,
-                new KeyFactStore(), new FactExtractor());
+                new KeyFactStore());
         mem.add(SystemMessage.from("SYS"));
         mem.add(UserMessage.from("USR"));
 
@@ -87,7 +87,7 @@ class LayeredChatMemoryTest {
     @Test
     void truncationKeepsAllWhenUnderCapacity() {
         LayeredChatMemory mem = new LayeredChatMemory("t", 3,
-                new KeyFactStore(), new FactExtractor());
+                new KeyFactStore());
         mem.add(SystemMessage.from("SYS"));
         mem.add(UserMessage.from("USR"));
         mem.add(aiToolCall("c1", "runExplain"));
@@ -121,7 +121,7 @@ class LayeredChatMemoryTest {
         // 超过 K=2 但 token 未达阈值 → 老 cycle 进 pending, summarizer 不调用
         RecordingSummarizer summarizer = new RecordingSummarizer();
         LayeredChatMemory mem = new LayeredChatMemory("t", 2,
-                new KeyFactStore(), new FactExtractor(), summarizer);
+                new KeyFactStore(), summarizer);
         mem.add(SystemMessage.from("SYS"));
         mem.add(UserMessage.from("USR"));
 
@@ -141,7 +141,7 @@ class LayeredChatMemoryTest {
         // 用极小 token 阈值 (50) 模拟真触发压缩
         RecordingSummarizer summarizer = new RecordingSummarizer();
         LayeredChatMemory mem = new LayeredChatMemory("t", 2, 50,
-                new KeyFactStore(), new FactExtractor(), summarizer);
+                new KeyFactStore(), summarizer);
         mem.add(SystemMessage.from("SYS_BASE_LONG_TEXT_TO_INFLATE_TOKEN_COUNT"));
         mem.add(UserMessage.from("USR_LONG_TEXT_TO_INFLATE_TOKEN_COUNT_AS_WELL"));
 
@@ -162,7 +162,7 @@ class LayeredChatMemoryTest {
         // 小阈值 + K=1, 模拟 2 cycle 后总 token 超阈值, 第 1 cycle 进 pending 后被 flush 成 summary
         RecordingSummarizer summarizer = new RecordingSummarizer();
         LayeredChatMemory mem = new LayeredChatMemory("t", 1, 30,
-                new KeyFactStore(), new FactExtractor(), summarizer);
+                new KeyFactStore(), summarizer);
         mem.add(SystemMessage.from("SYS_PADDING_TEXT"));
         mem.add(UserMessage.from("USR_PADDING_TEXT_LONGER"));
 
@@ -186,7 +186,7 @@ class LayeredChatMemoryTest {
     void summaryIsAbsentWhenNoCyclesCompressed() {
         RecordingSummarizer summarizer = new RecordingSummarizer();
         LayeredChatMemory mem = new LayeredChatMemory("t", 3,
-                new KeyFactStore(), new FactExtractor(), summarizer);
+                new KeyFactStore(), summarizer);
         mem.add(SystemMessage.from("SYS"));
         mem.add(UserMessage.from("USR"));
         mem.add(aiToolCall("c1", "runExplain"));
@@ -213,7 +213,7 @@ class LayeredChatMemoryTest {
             }
         };
         LayeredChatMemory mem = new LayeredChatMemory("t", 1, 30,
-                new KeyFactStore(), new FactExtractor(), failing);
+                new KeyFactStore(), failing);
         mem.add(SystemMessage.from("SYS_PADDING_LONG_ENOUGH"));
         mem.add(UserMessage.from("USR_PADDING_LONG_ENOUGH"));
 
@@ -236,7 +236,7 @@ class LayeredChatMemoryTest {
         // 小阈值让每加一个新 cycle 就触发一次压缩
         RecordingSummarizer summarizer = new RecordingSummarizer();
         LayeredChatMemory mem = new LayeredChatMemory("t", 1, 30,
-                new KeyFactStore(), new FactExtractor(), summarizer);
+                new KeyFactStore(), summarizer);
         mem.add(SystemMessage.from("SYS_PADDING_LONG_ENOUGH"));
         mem.add(UserMessage.from("USR_PADDING_LONG_ENOUGH"));
 
@@ -263,7 +263,7 @@ class LayeredChatMemoryTest {
         RecordingSummarizer summarizer = new RecordingSummarizer();
         LayeredChatMemory mem = new LayeredChatMemory(
                 "t", /*keepRecentToolCalls*/ 3, /*tokenThreshold*/ 1_000_000,
-                new KeyFactStore(), new FactExtractor(), summarizer);
+                new KeyFactStore(), summarizer);
         mem.add(SystemMessage.from("SYS"));
         mem.add(UserMessage.from("USR"));
 
@@ -295,7 +295,7 @@ class LayeredChatMemoryTest {
         RecordingSummarizer cycleOnly = new RecordingSummarizer();
         LayeredChatMemory tokenSafe = new LayeredChatMemory(
                 "c", /*K*/ 2, /*tokenThreshold*/ 1_000_000,
-                new KeyFactStore(), new FactExtractor(), cycleOnly);
+                new KeyFactStore(), cycleOnly);
         tokenSafe.add(SystemMessage.from("S"));
         tokenSafe.add(UserMessage.from("U"));
         for (int i = 1; i <= 10; i++) {
@@ -310,7 +310,7 @@ class LayeredChatMemoryTest {
         RecordingSummarizer tokenTrig = new RecordingSummarizer();
         LayeredChatMemory tokenSmall = new LayeredChatMemory(
                 "t", /*K*/ 1, /*tokenThreshold*/ 30,
-                new KeyFactStore(), new FactExtractor(), tokenTrig);
+                new KeyFactStore(), tokenTrig);
         tokenSmall.add(SystemMessage.from("SYS_PAD_TEXT"));
         tokenSmall.add(UserMessage.from("USR_PAD_TEXT_LONGER"));
         for (int i = 1; i <= 2; i++) {

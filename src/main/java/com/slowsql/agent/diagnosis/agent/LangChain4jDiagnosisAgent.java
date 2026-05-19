@@ -5,7 +5,6 @@ import com.slowsql.agent.diagnosis.api.DiagnosisAgent;
 import com.slowsql.agent.diagnosis.api.DiagnosisResult;
 import com.slowsql.agent.diagnosis.api.OutcomeType;
 
-import com.slowsql.agent.diagnosis.memory.FactExtractor;
 import com.slowsql.agent.diagnosis.memory.KeyFactStore;
 import com.slowsql.agent.diagnosis.memory.LayeredChatMemory;
 import com.slowsql.agent.diagnosis.memory.ToolCallWindowChatMemory;
@@ -42,8 +41,8 @@ import java.util.List;
  *     - 旧 ReAct 周期由 LlmHistorySummarizer 语义压缩成累积摘要(历史摘要层),
  *       而非直接丢弃, 保留行为脉络可见性.
  *     - 最近 K 个完整周期原样保留(当前轮层), 默认 K=3.
- *     - ToolExecutionResultMessage 进入 memory 时由 FactExtractor 解析 JSON,
- *       抽出紧凑事实到共享的 KeyFactStore(旁路, 不强占 prompt).
+ *     - DiagnosisTools 在每个 @Tool 返回前直接调 result.exportFactsTo(factStore) 抽事实,
+ *       record 自带 fact 导出, 不再依赖 ChatMemory.add 路径上的 JSON 解析旁路.
  *   KeyFactStore 在 LayeredChatMemory 和 DiagnosisTools 之间共享: memory 负责写,
  *   recallFacts 工具负责读(pull 而非 push).
  *   效果: token 不再随轮次线性增长; 早期工具结果有摘要 + 结构化事实双通道召回.
@@ -113,7 +112,8 @@ public class LangChain4jDiagnosisAgent implements DiagnosisAgent {
         ChatModel model = ChatModelFactory.build(
                 llmConfig,
                 List.of(new StatsCollectingListener(stats)));
-        // 共享 KeyFactStore: memory 端在 FactExtractor 里写, tools 端在 recallFacts 里读.
+        // 共享 KeyFactStore: DiagnosisTools 在每个 @Tool 返回前调 result.exportFactsTo(store) 写,
+        //                     tools 端在 recallFacts 里读.
         // BASELINE 路径不用 KeyFactStore, 但 DiagnosisTools 仍持有一个空 store 让 recallFacts
         // 工具继续可用 (baseline 调 recallFacts 永远拿空集 — 与"baseline 没有事实库"语义吻合).
         KeyFactStore factStore = new KeyFactStore();
@@ -160,7 +160,7 @@ public class LangChain4jDiagnosisAgent implements DiagnosisAgent {
             case LAYERED -> new LayeredChatMemory(
                     "diagnose-" + System.nanoTime(),
                     LayeredChatMemory.DEFAULT_KEEP_RECENT_TOOL_CALLS,
-                    factStore, new FactExtractor(),
+                    factStore,
                     new LlmHistorySummarizer(model));
             case BASELINE_WINDOW -> new ToolCallWindowChatMemory(
                     "baseline-" + System.nanoTime(),

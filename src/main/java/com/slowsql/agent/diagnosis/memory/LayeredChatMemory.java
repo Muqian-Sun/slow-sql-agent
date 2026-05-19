@@ -23,8 +23,9 @@ import java.util.Objects;
  *   [3] archive         摘要区             单一 List, 0 或 1 条已压缩 SystemMessage 在头部, 后跟未压缩原样老 cycle
  *   [4] recent          当前轮             最近 keepCycles 个完整 ReAct 周期, 原样
  *
- *   旁路: KeyFactStore — 结构化事实库, 由 FactExtractor 在 ToolExecutionResultMessage
- *                        进入时旁路抽取; LLM 通过 recallFacts 工具按需 pull, 不强占 prompt.
+ *   旁路: KeyFactStore — 结构化事实库, 由 DiagnosisTools 在每个 @Tool 返回前直接调
+ *                        result.exportFactsTo(store) 抽取 (record 自带 fact 导出能力);
+ *                        LLM 通过 recallFacts 工具按需 pull, 不强占 prompt.
  *
  * archive 的两态混合:
  *   - 刚 spill 进来的老 cycle 是原样消息(token 大但语义完整)
@@ -81,7 +82,6 @@ public class LayeredChatMemory implements ChatMemory {
     private final int keepRecentToolCalls;
     private final int tokenThreshold;
     private final KeyFactStore factStore;
-    private final FactExtractor extractor;
     private final HistorySummarizer summarizer;
 
     private SystemMessage originalSystem;
@@ -97,32 +97,31 @@ public class LayeredChatMemory implements ChatMemory {
     private final List<ChatMessage> recent = new ArrayList<>();
 
     public LayeredChatMemory(Object id, int keepRecentToolCalls, int tokenThreshold,
-                             KeyFactStore factStore, FactExtractor extractor,
+                             KeyFactStore factStore,
                              HistorySummarizer summarizer) {
         this.id = Objects.requireNonNull(id);
         this.keepRecentToolCalls = keepRecentToolCalls;
         this.tokenThreshold = tokenThreshold;
         this.factStore = Objects.requireNonNull(factStore);
-        this.extractor = Objects.requireNonNull(extractor);
         this.summarizer = Objects.requireNonNull(summarizer);
     }
 
     public LayeredChatMemory(Object id, int keepRecentToolCalls,
-                             KeyFactStore factStore, FactExtractor extractor,
+                             KeyFactStore factStore,
                              HistorySummarizer summarizer) {
         this(id, keepRecentToolCalls, DEFAULT_TOKEN_THRESHOLD,
-                factStore, extractor, summarizer);
+                factStore, summarizer);
     }
 
     public LayeredChatMemory(Object id, int keepRecentToolCalls,
-                             KeyFactStore factStore, FactExtractor extractor) {
+                             KeyFactStore factStore) {
         this(id, keepRecentToolCalls, DEFAULT_TOKEN_THRESHOLD,
-                factStore, extractor, new NoOpHistorySummarizer());
+                factStore, new NoOpHistorySummarizer());
     }
 
     public LayeredChatMemory(Object id) {
         this(id, DEFAULT_KEEP_RECENT_TOOL_CALLS, DEFAULT_TOKEN_THRESHOLD,
-                new KeyFactStore(), new FactExtractor(), new NoOpHistorySummarizer());
+                new KeyFactStore(), new NoOpHistorySummarizer());
     }
 
     @Override
@@ -139,9 +138,8 @@ public class LayeredChatMemory implements ChatMemory {
             this.userMessage = um;
             return;
         }
-        if (message instanceof ToolExecutionResultMessage tm) {
-            extractor.extract(tm.toolName(), tm.text(), factStore);
-        }
+        // fact 抽取已移到 DiagnosisTools 层 (record.exportFactsTo) — 编译期约束 + 直接字段访问,
+        // 不再在 ChatMemory.add 路径上做 JSON 解析旁路.
         recent.add(message);
         spillOverflowToArchive();
         // 压缩只看 token: 防 prompt 爆窗口的兜底, 不要求"必须经常触发".

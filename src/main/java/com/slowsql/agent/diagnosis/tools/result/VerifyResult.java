@@ -1,5 +1,7 @@
 package com.slowsql.agent.diagnosis.tools.result;
 
+import com.slowsql.agent.diagnosis.memory.KeyFact;
+import com.slowsql.agent.diagnosis.memory.KeyFactStore;
 import com.slowsql.agent.diagnosis.tools.ErrorCategory;
 
 import com.slowsql.agent.diagnosis.tools.HintCatalog;
@@ -62,7 +64,7 @@ public record VerifyResult(
         Long originalLatencyMs,         // 原 SQL 双跑实际执行耗时, 仅 row_hash 路径有
         Long rewrittenLatencyMs,        // 改写 SQL 双跑实际执行耗时, 仅 row_hash 路径有
         Double speedupX                 // = originalLatencyMs / rewrittenLatencyMs, e.g. 38.9 倍
-) {
+) implements FactExportable {
     public record PlanRow(
             String table,
             String type,
@@ -76,6 +78,20 @@ public record VerifyResult(
     public boolean isPass()  { return "pass".equals(status); }
 
     public String toJson() { return ToolJson.toJson(this); }
+
+    @Override
+    public void exportFactsTo(KeyFactStore store) {
+        if (status == null || status.isBlank()) return;
+        StringBuilder detail = new StringBuilder(status.toUpperCase());
+        if (strategy != null && !strategy.isBlank()) detail.append(" (").append(strategy).append(")");
+        if (isPass() && rowsReductionPct != null) {
+            detail.append(" reduction=").append(String.format("%.2f%%", rowsReductionPct));
+        } else if ((isFail() || isError()) && reason != null && !reason.isBlank()) {
+            detail.append(" reason=").append(reason);
+        }
+        // last_verify 多次会覆盖, 与之前 FactExtractor 行为一致
+        store.put(KeyFact.verify("last_verify", detail.toString()));
+    }
 
     // ---------- 工厂方法 ----------
 

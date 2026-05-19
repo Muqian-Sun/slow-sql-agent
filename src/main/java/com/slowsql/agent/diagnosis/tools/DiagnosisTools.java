@@ -108,6 +108,7 @@ public class DiagnosisTools {
                 stats.onToolFailure(r.reason());
                 failed = true; failReason = r.reason();
             }
+            r.exportFactsTo(factStore);
             resultJson = r.toJson();
             return resultJson;
         } catch (ToolCallLimitExceededException e) {
@@ -144,6 +145,7 @@ public class DiagnosisTools {
                 stats.onToolFailure(r.reason());
                 failed = true; failReason = r.reason();
             }
+            r.exportFactsTo(factStore);
             resultJson = r.toJson();
             return resultJson;
         } catch (ToolCallLimitExceededException e) {
@@ -207,6 +209,7 @@ public class DiagnosisTools {
                     failed = true; failReason = "verify_fail:" + r.reason();
                 }
             }
+            r.exportFactsTo(factStore);
             resultJson = r.toJson();
             return resultJson;
         } catch (ToolCallLimitExceededException e) {
