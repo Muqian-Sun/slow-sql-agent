@@ -21,7 +21,6 @@ public record EvalReport(
 
         // ─── 第 1 层:业务价值 ───
         double p95LatencyMs,
-        double highConfidenceRate,
         double tokenReductionVsBaseline,    // 与 baseline 对比的 token 降幅,需配 comparedTo
 
         // ─── 第 2 层:效果 ───
@@ -84,7 +83,6 @@ public record EvalReport(
         double outcomeMatch = ratio(all, RunResult::outcomeMatched);
         double verifyPass = ratio(all, RunResult::verificationPassed);
         double verifyUndet = ratio(all, r -> "UNDETERMINED".equals(r.verificationStatus()));
-        double highConf = ratio(all, RunResult::isHighConfidence);
         double assumptionsRate = ratio(all, RunResult::hasExplicitAssumptions);
 
         // 按 expected 分桶: rewrite_precision (期望 rewrite 的 case 命中率) + unsupported_recall
@@ -147,7 +145,7 @@ public record EvalReport(
         return new EvalReport(
                 config.promptVersion(), Instant.now(),
                 resultsPerCase.size(), totalRuns,
-                p95, highConf, 0.0,
+                p95, 0.0,
                 outcomeMatch, rewritePrec, rewritePrecStrict, unsupRecall,
                 verifyPass, verifyUndet, costMed,
                 speedupMed, speedupMax,
@@ -175,7 +173,7 @@ public record EvalReport(
 
     private static EvalReport empty(EvalConfig config) {
         return new EvalReport(config.promptVersion(), Instant.now(),
-                0, 0, 0, 0, 0,
+                0, 0, 0, 0,
                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 0, 0, 0, 0, Map.of(),
                 List.of(), List.of());

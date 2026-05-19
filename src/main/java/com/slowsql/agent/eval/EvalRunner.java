@@ -62,12 +62,12 @@ public class EvalRunner {
         }
 
         EvalReport report = EvalReport.aggregate(results, config);
-        log.info("Eval completed: {} cases, p95_latency={}ms, outcome_match={}%, verify_pass={}%, high_conf={}%",
+        log.info("Eval completed: {} cases, p95_latency={}ms, outcome_match={}%, verify_pass={}%, rewrite_precision_strict={}%",
                 report.totalCases(),
                 (long) report.p95LatencyMs(),
                 String.format("%.1f", report.outcomeMatchRate() * 100),
                 String.format("%.1f", report.verificationPassRate() * 100),
-                String.format("%.1f", report.highConfidenceRate() * 100));
+                String.format("%.1f", report.rewritePrecisionStrict() * 100));
 
         if (config.generateHtmlReport()) {
             var reportPath = reporter.writeHtml(report, config.reportOutputDir());

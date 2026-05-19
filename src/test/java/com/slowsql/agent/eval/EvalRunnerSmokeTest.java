@@ -34,7 +34,7 @@ class EvalRunnerSmokeTest {
         System.out.println("  runs:              " + report.totalRuns());
         System.out.println("  outcome_match:     " + pct(report.outcomeMatchRate()));
         System.out.println("  verify_pass:       " + pct(report.verificationPassRate()));
-        System.out.println("  high_confidence:   " + pct(report.highConfidenceRate()));
+        System.out.println("  rewrite_precision_strict: " + pct(report.rewritePrecisionStrict()));
         System.out.println("  assumptions_rate:  " + pct(report.assumptionsExplicitRate()));
         System.out.println("  avg_rounds:        " + report.avgReactRounds());
         System.out.println("  p95_latency_ms:    " + (long) report.p95LatencyMs());

@@ -113,7 +113,7 @@ class LangChain4jEvalRunnerIT {
         System.out.printf("  runs:               %d%n", report.totalRuns());
         System.out.printf("  outcome_match:      %.1f%%%n", report.outcomeMatchRate() * 100);
         System.out.printf("  verify_pass:        %.1f%%%n", report.verificationPassRate() * 100);
-        System.out.printf("  high_confidence:    %.1f%%%n", report.highConfidenceRate() * 100);
+        System.out.printf("  rewrite_precision_strict: %.1f%%%n", report.rewritePrecisionStrict() * 100);
         System.out.printf("  assumptions_rate:   %.1f%%%n", report.assumptionsExplicitRate() * 100);
         System.out.printf("  avg_react_rounds:   %.2f%n", report.avgReactRounds());
         System.out.printf("  p95_latency:        %d ms%n", (long) report.p95LatencyMs());

@@ -61,7 +61,6 @@ public class ReportGenerator {
         sb.append("<h2>📊 第 1 层 业务价值</h2>");
         appendMetricsTable(sb, new String[][]{
                 {"p95_latency_ms", String.format("%.0f", r.p95LatencyMs()), "< 120 000"},
-                {"high_confidence_rate", pct(r.highConfidenceRate()), "> 70%"},
                 {"token_reduction_vs_baseline",
                         r.tokenReductionVsBaseline() == 0.0
                                 ? "见 MemoryComparisonIT 独立产出"

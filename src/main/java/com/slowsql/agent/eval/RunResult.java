@@ -37,13 +37,6 @@ public record RunResult(
         String error
 ) {
 
-    /** 是否符合"高置信度一键放行"标准:置信度 ≥ 0.85 且 verify 通过 */
-    public boolean isHighConfidence() {
-        return diagnosis != null
-                && diagnosis.confidence() >= 0.85
-                && verificationPassed;
-    }
-
     /** 是否含显式 assumptions(tie-breaker / 改 API 等场景必须有) */
     public boolean hasExplicitAssumptions() {
         return diagnosis != null
